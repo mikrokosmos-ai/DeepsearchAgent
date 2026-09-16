@@ -1,0 +1,91 @@
+# ============================================================
+# DeepsearchAgent .gitignore
+# 栈：Python(FastAPI+LangGraph) 后端 + React/TS/Vite 前端
+# 生成时仓库为全新初始化（master，0 已跟踪文件），可按需调整。
+# ============================================================
+
+# -------------------- 环境变量 / 密钥 --------------------
+# 真实密钥文件必须忽略；示例文件保留入库供他人对照。
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# -------------------- Python --------------------
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 字节码 / 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 打包 / 分发
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+
+# 类型检查 / 测试 / 质量
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+
+# -------------------- Node / 前端 --------------------
+# 依赖与构建产物（前端在 frontend/ 子目录）
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# -------------------- 日志 --------------------
+*.log
+logs/
+
+# -------------------- 运行时产出（非源码） --------------------
+# 后端会话/评测产出
+app/output/
+app/updated/
+
+# Docker 挂载的数据卷（MinIO 等二进制数据，体积大且不入库）
+docker/volumes/
+
+# 本地快照/备份（重构或测试前的可逆副本）
+_backup*/
+
+# -------------------- IDE --------------------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# -------------------- 本地助手数据 --------------------
+# WorkBuddy 本地项目记忆：忽略每日日志（机器/时序相关，重新生成）；
+# 保留 MEMORY.md（项目长期约定，建议随仓库共享）。
+.workbuddy/
+.workbuddy/memory/20*.md
+.workbuddy/memory/*.tmp
+
+# -------------------- 操作系统 --------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+output/
+scripts/
+docker/mysql/mysql.sql

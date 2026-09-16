@@ -1,0 +1,223 @@
+# DeepSearch Agents 本地基础设施编排（MySQL + RAG 全栈，单文件）
+#
+# 运行位置：在 docker 目录执行
+#   docker compose --env-file ../.env up -d
+# --env-file 用于端口等插值变量（compose 只读同目录 .env 和 shell 环境，
+# 不读服务级 env_file，因此必须显式指定，否则 MYSQL_PORT 会落到默认 3306）。
+#
+# 说明：
+#   - 本文件由原 docker-compose.yaml（MySQL）与 docker-compose.rag.yaml（RAG）合并而成，
+#     统一 project name 为 deepsearch-agents，避免两套 project 前缀造成的 volume 混乱。
+#   - 首次启动时，mysql/mysql.sql 会被官方镜像自动导入到 deepsearch_db。
+#     如果数据卷已存在，MySQL 不会重复执行初始化脚本，需要重建 volume 才会重新导入。
+#   - 镜像均固定为本机已预置版本；pull_policy: never 保证不会因 tag 漂移触发回源下载。
+#
+# 服务清单（8 个）：
+#   mysql        —— 业务关系库（3306 容器内 / ${MYSQL_PORT:-3306} 宿主机）
+#   minio        —— 业务图片对象存储（9000/9001）
+#   etcd         —— Milvus 元数据协调（内部）
+#   milvus-minio —— Milvus 内部向量索引存储（9002/9003）
+#   milvus       —— 稠密+稀疏混合检索核心（19530/9091）
+#   attu         —— Milvus 可视化管理台（8010）
+#   mongo        —— 对话历史与商品名确认记忆（27017）
+#   neo4j        —— 知识图谱（7474/7687）
+#
+# 数据卷前缀统一为 deepsearch-agents_（原 RAG 卷已从 deepsearch-agents-rag_ 迁移）。
+
+name: deepsearch-agents
+
+x-local-image: &local-image
+  # 本地预置镜像策略：镜像缺失时直接报错，而不是静默回源下载
+  pull_policy: never
+
+services:
+  # ===== MySQL：业务关系库 =====
+  mysql:
+    image: mysql:8.0
+    # 使用本机已预置镜像，镜像缺失时直接报错而非回源下载
+    pull_policy: never
+    container_name: deepsearch-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: axw0505
+      MYSQL_ROOT_HOST: AXW
+      MYSQL_DATABASE: axw0505
+      TZ: Asia/Shanghai
+    # 与 Python 连接配置保持一致，避免中文字段或日期时间在导入、查询时出现偏差
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --sql-mode=TRADITIONAL
+    ports:
+      # .env.example 默认使用 3307，避免和本机已有 MySQL 的 3306 端口冲突
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - deepsearch_mysql_data:/var/lib/mysql
+      # 只读挂载初始化 SQL，容器首次创建数据目录时会自动执行
+      - ./mysql/mysql.sql:/docker-entrypoint-initdb.d/01-init-pharma.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ===== 业务 MinIO：存放 MinerU 解析出的图片，供答案中的图片链接引用 =====
+  minio:
+    <<: *local-image
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: deepsearch-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # 浏览器通过 9000 端口直连图片，需允许前端源跨域访问
+      MINIO_BROWSER_REDIRECT_URL: http://127.0.0.1:9001
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"      # S3 / 数据 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"  # Web 控制台
+    volumes:
+      - ./volumes/minio:/data
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus 依赖：etcd 存放集合元数据与协调信息 =====
+  etcd:
+    <<: *local-image
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: deepsearch-etcd
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus 依赖：内部 MinIO 存放向量索引与日志 =====
+  # 宿主机端口错开为 9002/9003，避免与业务 MinIO 的 9000/9001 冲突
+  milvus-minio:
+    <<: *local-image
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: deepsearch-milvus-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "${MILVUS_MINIO_CONSOLE_PORT:-9003}:9001"
+      - "${MILVUS_MINIO_API_PORT:-9002}:9000"
+    volumes:
+      - milvus_minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus standalone：稠密 + 稀疏混合检索的核心存储 =====
+  milvus:
+    <<: *local-image
+    image: milvusdb/milvus:v2.6.23
+    container_name: deepsearch-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"        # gRPC 接口
+      - "${MILVUS_METRICS_PORT:-9091}:9091"  # 健康检查与指标
+    depends_on:
+      - etcd
+      - milvus-minio
+    healthcheck:
+      # Milvus 冷启动需加载索引，start_period 放宽到 90s 避免误判不健康
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # ===== Attu：Milvus 可视化管理台 http://127.0.0.1:8010 =====
+  attu:
+    <<: *local-image
+    image: zilliz/attu:v2.6.0
+    container_name: deepsearch-attu
+    restart: unless-stopped
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "${ATTU_PORT:-8010}:3000"
+    depends_on:
+      - milvus
+
+  # ===== MongoDB：对话历史与商品名确认记忆 =====
+  # 无鉴权模式，与 MONGO_URL 不含凭据的配置保持一致
+  mongo:
+    <<: *local-image
+    image: mongo:7
+    container_name: deepsearch-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      start_period: 20s
+      timeout: 20s
+      retries: 3
+
+  # ===== Neo4j：知识图谱（Bolt 7687 / Browser 7474）=====
+  # 用户名密码需与 .env 的 NEO4J_USER / NEO4J_PASSWORD 一致
+  neo4j:
+    <<: *local-image
+    image: neo4j:5.26-community
+    container_name: deepsearch-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/neo4j123456
+      # 社区版堆内存上限，避免与 Milvus 争抢内存
+      NEO4J_server_memory_heap_max__size: 1G
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"  # Browser
+      - "${NEO4J_BOLT_PORT:-7687}:7687"  # Bolt 协议
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 30s
+      start_period: 30s
+      timeout: 20s
+      retries: 3
+
+volumes:
+  deepsearch_mysql_data:
+  etcd_data:
+  milvus_minio_data:
+  milvus_data:
+  mongo_data:
+  neo4j_data:
+  neo4j_logs:
