@@ -27,8 +27,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.api.context import set_thread_context
 from app.api.rag_event_bridge import PipelineEventBridge
 from app.core.logger import logger
-from app.pipelines.import_pipeline.graph import kb_import_app
-from app.pipelines.import_pipeline.state import create_default_state
+from app.core.paths import PROJECT_ROOT
+from app.rag.pipelines.import_pipeline.graph import kb_import_app
+from app.rag.pipelines.import_pipeline.state import create_default_state
 from app.utils.task_utils import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PENDING,
@@ -40,10 +41,9 @@ from app.utils.task_utils import (
     update_task_status,
 )
 
-# app/api/kb_routes.py -> 上级即 app 目录，与 server.py 的目录约定保持一致
-_app_root = Path(__file__).resolve().parent.parent
-# 导入文件独立目录：与对话链路的 updated/session_* 隔离，便于清理与排查
-_kb_import_dir = _app_root / "updated" / "kb_import"
+# 导入文件独立目录（仓库根下）：与对话链路的 updated/session_* 隔离，便于清理与排查
+# 与 server.py 的 updated_dir 同源，均由 app.core.paths.PROJECT_ROOT 推导
+_kb_import_dir = PROJECT_ROOT / "updated" / "kb_import"
 
 # 允许的导入文件类型（与前端 UploadDropzone 的校验保持一致）
 _ALLOWED_SUFFIXES = {".pdf", ".md", ".markdown"}

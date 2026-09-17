@@ -8,7 +8,6 @@ session_id 创建独立工作目录，并把工具调用、子智能体调用和
 
 import asyncio
 import shutil
-from pathlib import Path
 
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
@@ -25,6 +24,7 @@ from app.api.context import (
 )
 from app.api.monitor import monitor
 from app.core.logger import logger
+from app.core.paths import PROJECT_ROOT
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -43,8 +43,8 @@ main_agent = create_deep_agent(
     subagents=[database_query_agent, network_search_agent, local_knowledge_agent],
 )
 
-# 当前文件位于 app/agent/main_agent.py，parents[1] 即 app 目录
-project_root_path = Path(__file__).parents[1].resolve()
+# 会话工作区与上传暂存统一落在仓库根（与 RAG import pipeline 的 PROJECT_ROOT/output 约定一致）
+project_root_path = PROJECT_ROOT
 
 
 async def run_deep_agent(task_query, session_id):

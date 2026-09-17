@@ -30,10 +30,7 @@ from app.agent.main_agent import run_deep_agent
 from app.api.kb_routes import router as kb_router
 from app.api.lifespan import lifespan
 from app.api.monitor import manager
-
-# 当前文件位于 app/api/server.py，运行时目录统一收敛到 app 目录
-current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parent
+from app.core.paths import PROJECT_ROOT
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
@@ -44,12 +41,14 @@ app.include_router(kb_router)
 active_tasks: dict[str, asyncio.Task] = {}
 
 # output 保存每个会话最终工作区，前端只允许从这里浏览和下载生成文件
-output_dir = project_root / "output"
-output_dir.mkdir(exist_ok=True)
+# 统一落在仓库根：与 RAG import pipeline 的 PROJECT_ROOT/output 约定一致，
+# 不再使用 app 目录下的 output，避免项目内出现两个 output 根
+output_dir = PROJECT_ROOT / "output"
+output_dir.mkdir(parents=True, exist_ok=True)
 
 # updated 暂存用户上传文件，run_deep_agent 启动时会复制到对应 output/session_xxx
-updated_dir = project_root / "updated"
-updated_dir.mkdir(exist_ok=True)
+updated_dir = PROJECT_ROOT / "updated"
+updated_dir.mkdir(parents=True, exist_ok=True)
 
 # 教学项目通常前后端分别本地启动，这里放开跨域以便 Vite 页面直接调用 API
 app.add_middleware(

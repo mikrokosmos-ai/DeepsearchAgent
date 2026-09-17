@@ -26,8 +26,8 @@ from app.api.context import get_thread_context
 from app.api.monitor import monitor
 from app.api.rag_event_bridge import RagEventBridge
 from app.core.logger import logger
-from app.pipelines.query_pipeline.graph import query_app
-from app.pipelines.query_pipeline.state import create_query_default_state
+from app.rag.pipelines.query_pipeline.graph import query_app
+from app.rag.pipelines.query_pipeline.state import create_query_default_state
 
 # 取不到 DeepAgents 会话上下文时的兜底会话名：保证工具仍可用（只是历史聚合到同一会话）
 _DEFAULT_SESSION = "local_kb_default"

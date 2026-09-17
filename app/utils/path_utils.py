@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from app.core.paths import PROJECT_ROOT
+
 
 def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
     """
@@ -29,11 +31,11 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
             path_str = str(path).replace("\\", "/")
             break
 
-    # updated/ 用于存放用户上传文件，应优先按项目根目录下的真实上传路径解析
+    # updated/ 用于存放用户上传文件，按仓库根解析（原先依赖 cwd，启动目录一变就失效）
     if "updated/" in path_str:
         idx = path_str.find("updated/")
         relative_part = path_str[idx:]
-        return str(Path(relative_part).resolve())
+        return str((PROJECT_ROOT / relative_part).resolve())
 
     if not session_dir:
         return str(path.resolve())

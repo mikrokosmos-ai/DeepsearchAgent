@@ -33,12 +33,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.monitor import manager
-from app.clients.manager.embedding_client_manager import embedding_client_manager
-from app.clients.manager.milvus_client_manager import milvus_client_manager
-from app.clients.manager.minio_client_manager import minio_client_manager
-from app.clients.manager.mongo_client_manager import mongo_client_manager
-from app.clients.manager.neo4j_client_manager import neo4j_client_manager
-from app.clients.manager.reranker_client_manager import reranker_client_manager
+from app.rag.clients.manager.embedding_client_manager import embedding_client_manager
+from app.rag.clients.manager.milvus_client_manager import milvus_client_manager
+from app.rag.clients.manager.minio_client_manager import minio_client_manager
+from app.rag.clients.manager.mongo_client_manager import mongo_client_manager
+from app.rag.clients.manager.neo4j_client_manager import neo4j_client_manager
+from app.rag.clients.manager.reranker_client_manager import reranker_client_manager
 from app.core.logger import logger
 
 # 本地模型预热开关：默认关闭，保持与懒加载行为一致
