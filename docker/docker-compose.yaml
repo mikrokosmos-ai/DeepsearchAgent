@@ -39,9 +39,10 @@ services:
     container_name: deepsearch-mysql
     restart: unless-stopped
     environment:
+      MYSQL_USER: AXW
       MYSQL_ROOT_PASSWORD: axw0505
-      MYSQL_ROOT_HOST: AXW
-      MYSQL_DATABASE: axw0505
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: deepsearch_db
       TZ: Asia/Shanghai
     # 与 Python 连接配置保持一致，避免中文字段或日期时间在导入、查询时出现偏差
     command:
