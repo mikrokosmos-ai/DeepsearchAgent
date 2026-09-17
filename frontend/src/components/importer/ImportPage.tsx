@@ -18,7 +18,7 @@ interface ImportPageProps {
 
 export function ImportPage({ threadId }: ImportPageProps) {
   const { message } = AntApp.useApp();
-  const { tasks, isUploading, lastError, uploadFiles, removeTask, refreshFromServer } =
+  const { tasks, isUploading, lastError, uploadFiles, removeTask, cancelTask, refreshFromServer } =
     useKbImport(threadId);
 
   const runningCount = tasks.filter(
@@ -41,6 +41,11 @@ export function ImportPage({ threadId }: ImportPageProps) {
 
   function handleRefresh() {
     refreshFromServer().catch(() => undefined);
+  }
+
+  async function handleCancel(fileId: string) {
+    await cancelTask(fileId);
+    message.info("已请求取消，最多等当前节点执行完毕后停止");
   }
 
   return (
@@ -89,7 +94,12 @@ export function ImportPage({ threadId }: ImportPageProps) {
       ) : (
         <div className="import-task-list">
           {tasks.map((task) => (
-            <TaskCard key={task.fileId} onRemove={removeTask} task={task} />
+            <TaskCard
+              key={task.fileId}
+              onCancel={handleCancel}
+              onRemove={removeTask}
+              task={task}
+            />
           ))}
         </div>
       )}

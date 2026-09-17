@@ -2,8 +2,9 @@
  * 导入任务卡
  *
  * 单条任务的可视化：文件名 / 大小 / 状态徽标 / 进度条 / 节点进度轨 / 错误信息。
+ * 进行中的任务额外提供「取消」入口（后端为协作式取消，见 app/core/cancel.py）。
  */
-import { CloseOutlined, FileTextOutlined } from "@ant-design/icons";
+import { CloseOutlined, FileTextOutlined, StopOutlined } from "@ant-design/icons";
 import { Alert, Button, Progress } from "antd";
 
 import { formatFileSize } from "../../lib/nodes";
@@ -28,9 +29,13 @@ const PROGRESS_STATUS: Record<KbTaskPhase, "active" | "success" | "exception"> =
 interface TaskCardProps {
   task: KbImportTaskItem;
   onRemove: (fileId: string) => void;
+  onCancel: (fileId: string) => void;
 }
 
-export function TaskCard({ task, onRemove }: TaskCardProps) {
+export function TaskCard({ task, onRemove, onCancel }: TaskCardProps) {
+  // 只有已经拿到 task_id 的进行中任务才可取消（上传阶段后端还没登记任务）
+  const canCancel = task.phase === "processing" && Boolean(task.task_id);
+
   return (
     <article className={`console-panel task-card task-card--${task.phase}`}>
       <header className="task-card-head">
@@ -44,6 +49,17 @@ export function TaskCard({ task, onRemove }: TaskCardProps) {
           <span className={`task-badge task-badge--${task.phase}`}>
             {PHASE_LABEL[task.phase]}
           </span>
+          {canCancel ? (
+            <Button
+              aria-label={`取消 ${task.file_name}`}
+              icon={<StopOutlined />}
+              onClick={() => onCancel(task.fileId)}
+              size="small"
+              type="text"
+            >
+              取消
+            </Button>
+          ) : null}
           <Button
             aria-label={`移除 ${task.file_name}`}
             icon={<CloseOutlined />}

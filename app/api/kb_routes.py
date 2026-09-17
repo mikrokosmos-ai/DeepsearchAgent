@@ -196,6 +196,9 @@ async def import_kb_files(
                 "file_size": size,
                 # 受理即回传「开始上传文件」，前端无需等到第一次轮询就能点亮第一格
                 "done_list": ["开始上传文件"],
+                # 受理时产物目录已经确定（output/kb/{task_id}），一并回传，
+                # 前端无需等轮询即可拿到浏览本次产物的路径
+                "output_dir": str(kb_output_dir(task_id)),
             }
         )
 

@@ -35,3 +35,13 @@ export async function getKbTask(taskId: string): Promise<KbTaskStatus> {
 export async function listKbTasks(): Promise<KbTaskListResponse> {
   return requestJson<KbTaskListResponse>(`${API_BASE_URL}/api/kb/tasks`);
 }
+
+/** 取消一个正在进行的导入任务（后端置位协作式取消标志，最多等当前节点跑完） */
+export async function cancelKbTask(
+  taskId: string
+): Promise<{ status: string; task_id: string; message?: string }> {
+  return requestJson<{ status: string; task_id: string; message?: string }>(
+    `${API_BASE_URL}/api/kb/task/${encodeURIComponent(taskId)}/cancel`,
+    { method: "POST" }
+  );
+}

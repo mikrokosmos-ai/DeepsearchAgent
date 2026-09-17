@@ -11,7 +11,7 @@
  *      实时性更好，但轮询是无条件兜底，二者不冲突。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getKbTask, importKbFiles, listKbTasks } from "../lib/kbApi";
+import { cancelKbTask, getKbTask, importKbFiles, listKbTasks } from "../lib/kbApi";
 import { importProgress } from "../lib/nodes";
 import type { KbImportTask, KbTaskStatus } from "../types";
 
@@ -48,6 +48,7 @@ function emptyStatus(threadId: string): KbTaskStatus {
     running_list: [],
     file_name: "",
     file_size: 0,
+    output_dir: "",
     thread_id: threadId,
     created_at: Date.now() / 1000,
     error: ""
@@ -66,12 +67,20 @@ function resolvePhase(status: string): KbImportTask["phase"] {
 
 function toTaskItem(status: KbTaskStatus, fileId: string): KbImportTaskItem {
   const phase = resolvePhase(status.status);
+  // 「处理完成」兜底（问题 1）：LangGraph 的 END 是隐式节点，后端虽已显式补登记，
+  // 但历史任务（改动前创建）与后端异常路径都可能缺这一格。
+  // 只要任务已进入成功终态，就把它补进 done_list，保证进度轨最后一格点亮。
+  const doneList =
+    phase === "completed" && !status.done_list.includes("处理完成")
+      ? [...status.done_list, "处理完成"]
+      : status.done_list;
   return {
     ...status,
+    done_list: doneList,
     fileId,
     phase,
     // 完成直接给 100；进行中/失败都按已完成节点换算（失败时保留已跑到的进度）
-    progress: phase === "completed" ? 100 : importProgress(status.done_list)
+    progress: phase === "completed" ? 100 : importProgress(doneList)
   };
 }
 
@@ -186,13 +195,18 @@ export function useKbImport(threadId: string) {
           if (!placeholder) {
             return;
           }
+          // 优先采用后端返回的 done_list（含「开始上传文件」）；
+          // 兼容旧后端未回传该字段的情况，退回本地推断
+          const doneList = brief.done_list ?? ["开始上传文件"];
           patchTask(placeholder.fileId, {
             task_id: brief.task_id,
             file_name: brief.file_name,
             file_size: brief.file_size,
+            output_dir: brief.output_dir ?? "",
+            done_list: doneList,
             phase: "processing",
             status: "processing",
-            progress: importProgress(["开始上传文件"])
+            progress: importProgress(doneList)
           });
         });
         return { accepted: accepted.length, rejected };
@@ -218,12 +232,45 @@ export function useKbImport(threadId: string) {
     setTasks((previous) => previous.filter((task) => task.fileId !== fileId));
   }, []);
 
+  /**
+   * 取消一个正在进行的导入任务（问题 5）
+   *
+   * 后端为协作式取消：置位标志后，链路会在**下一个节点入口**退出，
+   * 因此这里立刻把本地置为 failed 态给出反馈，随后轮询会拉到后端的最终状态。
+   */
+  const cancelTask = useCallback(
+    async (fileId: string) => {
+      const target = tasksRef.current.find((task) => task.fileId === fileId);
+      if (!target?.task_id) {
+        return;
+      }
+      // 先把「取消中」反馈给用户，避免等待期间界面无变化
+      patchTask(fileId, { status: "failed", phase: "failed", error: "正在取消…" });
+      try {
+        const response = await cancelKbTask(target.task_id);
+        patchTask(fileId, {
+          status: "failed",
+          phase: "failed",
+          error: response.message || "已请求取消"
+        });
+      } catch (error) {
+        patchTask(fileId, {
+          status: "processing",
+          phase: "processing",
+          error: error instanceof Error ? error.message : "取消失败"
+        });
+      }
+    },
+    [patchTask]
+  );
+
   return {
     tasks,
     isUploading,
     lastError,
     uploadFiles,
     removeTask,
+    cancelTask,
     refreshFromServer
   };
 }
