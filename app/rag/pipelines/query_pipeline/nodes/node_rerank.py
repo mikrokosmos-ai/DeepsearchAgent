@@ -1,6 +1,8 @@
+import os
 import sys
 
-from app.rag.clients.reranker_client import get_reranker_model
+from app.core.exceptions import RerankError
+from app.rag.clients.manager.reranker_client_manager import reranker_client_manager
 from app.rag.conf.query_pipeline_config import query_pipeline_config
 from app.rag.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
@@ -21,6 +23,14 @@ RERANK_MIN_LOCAL_KEEP: int = query_pipeline_config.rerank_min_local_keep
 RERANK_GAP_RATIO: float = query_pipeline_config.rerank_gap_ratio
 # 断崖阈值（绝对）
 RERANK_GAP_ABS: float = query_pipeline_config.rerank_gap_abs
+# -----------------------------
+# Cross-Encoder 打分的资源约束
+RERANK_BATCH_SIZE: int = int(os.getenv("RERANK_BATCH_SIZE", "8"))
+# 单次打分超时（秒）：超时降级为 RRF 原序，而非无限等待
+RERANK_TIMEOUT_S: float = float(os.getenv("RERANK_TIMEOUT_S", "30"))
+# 显式最大长度：与模型原生默认一致，写进代码以免未来版本默认值变更引发 silent 行为漂移
+RERANK_MAX_LENGTH: int = int(os.getenv("RERANK_MAX_LENGTH", "512"))
+
 
 """
   节点: Cross-Encoder 重排 (node_rerank)
@@ -97,8 +107,7 @@ def step_3_rerank_score_and_sort(state, final_chunk_list):
     :return: 带有分的数据 [{title: , text: content or snippet , url : mcp专属 , type: milvus or web , score :0.x}]
     """
     # 0. 空候选保护：RRF 路与联网路同时为空（例如知识库尚未入库、检索无命中）时，
-    #    无文档可重排，直接返回空列表 —— 避免把空列表喂给原生 FlagReranker
-    #    （本项目 reranker_client 门面返回的是原生对象，不含 manager 封装的 0 长度保护）。
+    #    无文档可重排，直接返回空列表 —— 避免把空列表喂给底层 reranker
     if not final_chunk_list:
         logger.warning("RRF 路与联网路召回结果均为空，无文档可重排，跳过打分")
         return final_chunk_list
@@ -118,17 +127,27 @@ def step_3_rerank_score_and_sort(state, final_chunk_list):
         # 注意 [问题 , 答案]
         question_paris.append([rewritten_query, text])
     # 4.批量进行问题和答案打分
-    # 获取模型对象
-    reranker = get_reranker_model()
-    # score_list = text_list = final_chunk_list
-    # 0-1 normalize=True 方便进行断崖分值设计...
-    score_list = reranker.compute_score(question_paris, normalize=True)
+    # 统一走 manager：一次性获得 batch_size 控制、推理串行锁、超时保护与异常包装。
+    try:
+        score_list = reranker_client_manager.compute_score(
+            question_paris,
+            batch_size=RERANK_BATCH_SIZE,
+            timeout=RERANK_TIMEOUT_S,
+            max_length=RERANK_MAX_LENGTH,
+        )
+    except RerankError as e:
+        # 降级：重排不可用不应让整条查询链路失败。
+        # 保留 RRF 给出的顺序，仅补零分占位，后续 step_4 的断崖截断仍可正常工作。
+        logger.warning(f"重排失败，降级为 RRF 原序返回：{e}")
+        for chunk in final_chunk_list:
+            chunk.setdefault("score", 0.0)
+        return final_chunk_list
     # 5.将集合更新分数信息即可
     for score, chunk in zip(score_list, final_chunk_list):
         # score_list [分的列表 . xxxxxxx] 4位
         # chunk["score"] = f"{score:.4f}"  # 截取  0.12346 -> 0.1234
         chunk["score"] = round(score, 4)  # 四舍五入  0.12346 -> 0.1235
-    # 6.基于分数进行集合数据排序
+    # 6.基于分数进行集合排序
     final_chunk_list.sort(key=lambda x: x.get("score", 0.0), reverse=True)
     logger.info(f"已完成编排和打分！最终结果为：{final_chunk_list}")
     # 7.返回数据

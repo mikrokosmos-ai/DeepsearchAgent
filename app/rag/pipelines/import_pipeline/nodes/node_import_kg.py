@@ -254,17 +254,23 @@ def step_6_insert_neo4j(chunks, entities, relations, chunk_entity_names, item_na
 
 @step_log("step_7_backup_data")
 def step_7_backup_data(state, entities, relations) -> None:
-    """把本次抽取结果落 kg.json"""
+    """
+    把本次抽取结果落 kg.json
+    """
     local_dir = state.get("local_dir") or ""
     if not local_dir:
+        logger.warning("local_dir 为空，跳过知识图谱备份（无法确定落点）")
         return
     try:
+        # 目录可能尚未存在（如 md 路径导入，未经 node_pdf_to_md 建目录）
         os.makedirs(local_dir, exist_ok=True)
         backup_path = os.path.join(local_dir, "kg.json")
         with open(backup_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
+                    "task_id": state.get("task_id") or "",
                     "item_name": state.get("item_name") or "",
+                    "source_file": state.get("file_title") or "",
                     "entities": entities,
                     "relations": relations,
                 },

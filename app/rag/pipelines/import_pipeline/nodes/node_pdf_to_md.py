@@ -35,8 +35,12 @@ def step_1_validate_paths(state) -> Tuple[Path, Path]:
         logger.error(f"pdf_path的值为空,无法读取文件,直接抛出异常!")
         raise ValueError("pdf_path的参数值为空,无法读取文件!")
     if not local_dir:
-        local_dir = PROJECT_ROOT / "output"
-        logger.info(f"step_1_validate_paths检查发现local_dir没有默认值,给默认值:{local_dir}!")
+        # 兜底：正常情况下 kb_routes 会显式传入 output/kb/{task_id}。
+        local_dir = PROJECT_ROOT / "output" / "kb" / str(state.get('task_id') or "unknown")
+        logger.warning(
+            f"step_1_validate_paths 未收到 local_dir，按任务隔离约定兜底为:{local_dir}"
+            f"（请检查调用方是否漏传 local_dir，正常应由 kb_routes 传入）!"
+        )
     # 3. 将地址转化成Path对象
     pdf_path_obj = Path(pdf_path)
     local_dir_obj = Path(local_dir)

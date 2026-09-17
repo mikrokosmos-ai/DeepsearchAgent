@@ -32,7 +32,6 @@ from app.rag.pipelines.query_pipeline.state import create_query_default_state
 # 取不到 DeepAgents 会话上下文时的兜底会话名：保证工具仍可用（只是历史聚合到同一会话）
 _DEFAULT_SESSION = "local_kb_default"
 
-
 @tool
 def local_rag_search(question: str) -> str:
     """
@@ -50,22 +49,22 @@ def local_rag_search(question: str) -> str:
     session_id = get_thread_context() or _DEFAULT_SESSION
     task_id = f"{session_id}#{uuid4().hex[:8]}"
 
-    # 埋点：与其它工具一致，前端可据此展示「正在执行本地知识库检索」
-    monitor.report_tool(
-        tool_name="本地知识库检索工具：local_rag_search",
-        args={"question": question},
-    )
-
-    # 必须用 create_query_default_state 构造**完整** state：query 链路的默认 state
-    # 是各节点读取字段的契约基准（缺失键会触发节点内显式报错）
-    state = create_query_default_state(
-        session_id=session_id,
-        task_id=task_id,
-        original_query=question,
-        is_stream=True,
-    )
-
     try:
+        # 埋点：与其它工具一致，前端可据此展示「正在执行本地知识库检索」
+        monitor.report_tool(
+            tool_name="本地知识库检索工具：local_rag_search",
+            args={"question": question},
+        )
+
+        # 必须用 create_query_default_state 构造**完整** state：query 链路的默认 state
+        # 是各节点读取字段的契约基准（缺失键会触发节点内显式报错）
+        state = create_query_default_state(
+            session_id=session_id,
+            task_id=task_id,
+            original_query=question,
+            is_stream=True,
+        )
+
         # 桥接在独立线程消费 pipeline 推送的事件，主线程执行检索本身
         with RagEventBridge(task_id):
             result_state = query_app.invoke(state)
@@ -76,7 +75,7 @@ def local_rag_search(question: str) -> str:
             return "本地知识库未返回任何内容，可能知识库中没有与该问题相关的资料。"
         return answer
     except Exception as e:
-        # 检索失败不应中断整个智能体任务：转成中文提示交给模型继续处理
+        # 其它失败不应中断整个智能体任务：转成中文提示交给模型继续处理
         logger.error(f"本地知识库检索失败：task_id={task_id}，原因：{e}", exc_info=True)
         return f"本地知识库检索失败，错误原因：{str(e)}"
 

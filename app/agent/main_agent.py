@@ -23,8 +23,12 @@ from app.api.context import (
     set_thread_context,
 )
 from app.api.monitor import monitor
+from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
 from app.core.paths import PROJECT_ROOT
+# 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
+# 「函数作用域内存在赋值」而被 Python 判定为局部变量 → 调用处 UnboundLocalError。
+from app.core.runtime_paths import UPDATED_SESSIONS_DIR, session_dir as resolve_session_dir
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -43,8 +47,8 @@ main_agent = create_deep_agent(
     subagents=[database_query_agent, network_search_agent, local_knowledge_agent],
 )
 
-# 会话工作区与上传暂存统一落在仓库根（与 RAG import pipeline 的 PROJECT_ROOT/output 约定一致）
-project_root_path = PROJECT_ROOT
+# 会话工作区与上传暂存的目录契约统一由 app.core.runtime_paths 提供，
+# 本模块只消费 resolve_session_dir() / UPDATED_SESSIONS_DIR，不再自行拼接路径。
 
 
 async def run_deep_agent(task_query, session_id):
@@ -56,21 +60,22 @@ async def run_deep_agent(task_query, session_id):
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
     """
-    print(f"[MainAgent] 开始执行会话，session_id={session_id}")
+    logger.info(f"[MainAgent] 开始执行会话，session_id={session_id}")
 
-    # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
-    session_dir = project_root_path / "output" / f"session_{session_id}"
+    # 每个会话独立使用 output/sessions/session_{session_id}，避免不同用户的产物互相覆盖。
+    # resolve_session_dir() 内含旧路径只读兼容（旧的 output/session_* 仍可继续用），见 runtime_paths.py
+    session_dir = resolve_session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # 前端和工具使用绝对路径；提示词里只给模型相对路径，降低模型误用系统绝对路径的概率
     session_dir_str = str(session_dir).replace("\\", "/")
-    relative_session_dir_str = str(session_dir.relative_to(project_root_path)).replace(
+    relative_session_dir_str = str(session_dir.relative_to(PROJECT_ROOT)).replace(
         "\\", "/"
     )
 
     # 上传文件先落在 updated/session_{session_id}，执行前复制到本次 output 工作目录
     # 这样读文件工具和生成文件工具都只需要围绕同一个 session_dir 工作
-    updated_dir_path = project_root_path / "updated" / f"session_{session_id}"
+    updated_dir_path = UPDATED_SESSIONS_DIR / f"session_{session_id}"
     updated_info_prompt = ""
     if updated_dir_path.exists():
         files = [f.name for f in updated_dir_path.iterdir() if f.is_file()]
@@ -110,11 +115,23 @@ async def run_deep_agent(task_query, session_id):
     """
 
     try:
+        # 连 astream 都不启动，避免为一个已取消的任务白跑一次模型调用。
+        if is_cancelled(session_id):
+            logger.info(f"[MainAgent] 任务在启动前已被取消，跳过执行：session_id={session_id}")
+            monitor.report_task_cancelled()
+            return
+
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
         async for chunk in main_agent.astream(
             {"messages": [{"role": "user", "content": task_query + path_instruction}]},
             config=config,
         ):
+            # 协作式取消检查点：astream 的每一轮都是一次可中断边界。
+            if is_cancelled(session_id):
+                logger.info(f"[MainAgent] 检测到取消请求，停止流式执行：session_id={session_id}")
+                monitor.report_task_cancelled()
+                return
+
             # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
             for node_name, state in chunk.items():
                 if not state or "messages" not in state:
@@ -138,11 +155,15 @@ async def run_deep_agent(task_query, session_id):
                                     )
                         elif last_msg.content:
                             # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            print(
+                            logger.info(
                                 f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
                             )
                             monitor.report_task_result(last_msg.content)
 
+    except TaskCancelledError as e:
+        # 节点边界检出的协作式取消：与 asyncio.CancelledError 同样上报取消事件，
+        logger.info(f"[MainAgent] 任务已按用户请求取消：session_id={session_id}，{e}")
+        monitor.report_task_cancelled()
     except asyncio.CancelledError:
         monitor.report_task_cancelled()
         raise
@@ -156,6 +177,8 @@ async def run_deep_agent(task_query, session_id):
     finally:
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
         reset_session_context(session_dir_token, session_id_token)
+        # 清理协作式取消标志，避免内存态随会话数累积
+        clear_cancel(session_id)
 
 
 if __name__ == "__main__":

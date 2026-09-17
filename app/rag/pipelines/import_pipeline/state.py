@@ -19,7 +19,12 @@ class ImportGraphState(TypedDict):
     is_stream: bool
 
     # --- 路径相关 ---
-    local_dir: str  # 当前工作目录或输出目录
+    # local_dir 语义契约（统一后）：本次导入的「任务产物目录」，即
+    # output/kb/{task_id}（由 kb_routes 经 app.core.runtime_paths.kb_output_dir 传入）。
+    #   - node_pdf_to_md 在其下建 {stem}/ 放 {stem}.md 与 images/
+    #   - node_import_kg  在其中写 kg.json
+    # 注意：不要再把它当「输出根」用（那会导致产物散落到 output/ 根目录、同名互相覆盖）。
+    local_dir: str
     local_file_path: str  # 原始输入文件路径
     file_title: str  # 文件标题（文件名去后缀）
     pdf_path: str  # PDF 文件路径 (如果输入是PDF)

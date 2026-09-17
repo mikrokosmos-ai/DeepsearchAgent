@@ -26,8 +26,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.context import set_thread_context
 from app.api.rag_event_bridge import PipelineEventBridge
+from app.core.cancel import TaskCancelledError, clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
-from app.core.paths import PROJECT_ROOT
+from app.core.runtime_paths import KB_IMPORT_DIR, kb_output_dir
 from app.rag.pipelines.import_pipeline.graph import kb_import_app
 from app.rag.pipelines.import_pipeline.state import create_default_state
 from app.utils.task_utils import (
@@ -35,6 +36,8 @@ from app.utils.task_utils import (
     TASK_STATUS_PENDING,
     TASK_STATUS_PROCESSING,
     TASK_STATUS_COMPLETED,
+    add_done_task,
+    add_running_task,
     get_done_task_list,
     get_running_task_list,
     get_task_status,
@@ -42,8 +45,8 @@ from app.utils.task_utils import (
 )
 
 # 导入文件独立目录（仓库根下）：与对话链路的 updated/session_* 隔离，便于清理与排查
-# 与 server.py 的 updated_dir 同源，均由 app.core.paths.PROJECT_ROOT 推导
-_kb_import_dir = PROJECT_ROOT / "updated" / "kb_import"
+# 路径统一由 app.core.runtime_paths 提供，业务代码不再自行拼接 PROJECT_ROOT/output
+_kb_import_dir = KB_IMPORT_DIR
 
 # 允许的导入文件类型（与前端 UploadDropzone 的校验保持一致）
 _ALLOWED_SUFFIXES = {".pdf", ".md", ".markdown"}
@@ -66,6 +69,7 @@ def _task_payload(task_id: str, meta: Dict[str, Any]) -> Dict[str, Any]:
         "running_list": get_running_task_list(task_id),
         "file_name": meta.get("file_name", ""),
         "file_size": meta.get("file_size", 0),
+        "output_dir": meta.get("output_dir", ""),
         "thread_id": meta.get("thread_id", ""),
         "created_at": meta.get("created_at", 0.0),
         "error": meta.get("error", ""),
@@ -84,25 +88,48 @@ async def _run_import_task(task_id: str, file_path: Path, thread_id: str) -> Non
     if thread_id:
         set_thread_context(thread_id)
 
+    # 统一 local_dir 语义为「本次导入的任务产物目录」output/kb/{task_id}：
+    task_output_dir = kb_output_dir(task_id)
+
     state = create_default_state(
         task_id=task_id,
         local_file_path=str(file_path),
+        local_dir=str(task_output_dir),
         # is_stream=True 是 task_utils 推送进度事件的前置开关
         is_stream=True,
     )
 
+    # 清除上一次执行可能残留的取消标志：同一 task_id 不会复用，但保持与对话链路一致
+    reset_cancel(task_id)
+
     try:
+        add_running_task(task_id, "upload_file", True)
+        add_done_task(task_id, "upload_file", True)
+
         with PipelineEventBridge(task_id, event_prefix="kb", topic="知识库导入"):
             # 同步阻塞调用放入线程池：不阻塞事件循环，WebSocket 进度才能实时出去
             await asyncio.to_thread(kb_import_app.invoke, state)
+
+
+        add_done_task(task_id, "__end__", True)
         update_task_status(task_id, TASK_STATUS_COMPLETED)
         logger.info(f"知识库导入完成：task_id={task_id}，file={file_path.name}")
+    except TaskCancelledError as e:
+        # 协作式取消（用户主动停止）：属正常收尾，不记为失败堆栈
+        update_task_status(task_id, TASK_STATUS_FAILED)
+        meta = _kb_tasks.get(task_id)
+        if meta is not None:
+            meta["error"] = str(e)
+        logger.info(f"知识库导入已按用户请求取消：task_id={task_id}，{e}")
     except Exception as e:  # noqa: BLE001
         update_task_status(task_id, TASK_STATUS_FAILED)
         meta = _kb_tasks.get(task_id)
         if meta is not None:
             meta["error"] = str(e)
         logger.exception(f"知识库导入失败：task_id={task_id}，file={file_path.name}，原因：{e}")
+    finally:
+        # 清理取消标志（与 main_agent 的收尾一致，避免内存态累积）
+        clear_cancel(task_id)
 
 
 @router.post("/import")
@@ -152,6 +179,7 @@ async def import_kb_files(
             "file_name": safe_name,
             "file_size": size,
             "file_path": str(target_path),
+            "output_dir": str(kb_output_dir(task_id)),
             "thread_id": thread_id,
             "created_at": datetime.now().timestamp(),
             "error": "",
@@ -161,9 +189,40 @@ async def import_kb_files(
         asyncio.create_task(_run_import_task(task_id, target_path, thread_id))
 
         logger.info(f"已受理知识库导入任务：task_id={task_id}，file={safe_name}（{size} bytes）")
-        accepted.append({"task_id": task_id, "file_name": safe_name, "file_size": size})
+        accepted.append(
+            {
+                "task_id": task_id,
+                "file_name": safe_name,
+                "file_size": size,
+                # 受理即回传「开始上传文件」，前端无需等到第一次轮询就能点亮第一格
+                "done_list": ["开始上传文件"],
+            }
+        )
 
     return {"status": "accepted", "tasks": accepted}
+
+
+@router.post("/task/{task_id}/cancel")
+async def cancel_kb_task(task_id: str) -> Dict[str, Any]:
+    """
+    请求取消一个正在进行的知识库导入任务
+    """
+    meta = _kb_tasks.get(task_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if get_task_status(task_id) in (TASK_STATUS_COMPLETED, TASK_STATUS_FAILED):
+        raise HTTPException(status_code=409, detail="任务已结束，无法取消")
+
+    already = request_cancel(task_id)
+    update_task_status(task_id, TASK_STATUS_FAILED)
+    meta["error"] = meta.get("error") or "用户已取消该导入任务"
+    logger.info(f"已请求取消知识库导入任务：task_id={task_id}（重复取消={already}）")
+    return {
+        "status": "cancelling",
+        "task_id": task_id,
+        "message": "已请求取消，最多等当前节点执行完毕后停止",
+    }
 
 
 @router.get("/task/{task_id}")

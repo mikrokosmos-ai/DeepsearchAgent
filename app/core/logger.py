@@ -97,6 +97,23 @@ def _trace_id(state) -> str:
     return "-"
 
 
+def _cancel_checkpoint(state, node_name: str) -> None:
+    """
+    协作式取消检查点
+    """
+    if not isinstance(state, Mapping):
+        return
+
+    from app.core.cancel import is_cancelled
+
+    for key in ("session_id", "task_id"):
+        trace = state.get(key)
+        if trace and is_cancelled(str(trace)):
+            from app.core.cancel import TaskCancelledError
+
+            raise TaskCancelledError(f"任务已被用户取消（在节点 {node_name} 入口检出）")
+
+
 def node_log(node_name: str):
     """
     节点执行日志装饰器
@@ -118,6 +135,7 @@ def node_log(node_name: str):
             @wraps(func)
             async def async_wrapper(state, *args, **kwargs):
                 trace_id = _trace_id(state)
+                _cancel_checkpoint(state, node_name)
                 start_ts = time.time()
                 logger.info(f"[{node_name}] 节点开始，追踪ID={trace_id}")
                 try:
@@ -133,6 +151,7 @@ def node_log(node_name: str):
         @wraps(func)
         def wrapper(state, *args, **kwargs):
             trace_id = _trace_id(state)
+            _cancel_checkpoint(state, node_name)
             start_ts = time.time()
             logger.info(f"[{node_name}] 节点开始，追踪ID={trace_id}")
             try:

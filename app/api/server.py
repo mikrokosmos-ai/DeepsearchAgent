@@ -30,7 +30,9 @@ from app.agent.main_agent import run_deep_agent
 from app.api.kb_routes import router as kb_router
 from app.api.lifespan import lifespan
 from app.api.monitor import manager
-from app.core.paths import PROJECT_ROOT
+from app.core.cancel import clear_cancel, request_cancel, reset_cancel
+from app.core.logger import logger
+from app.core.runtime_paths import OUTPUT_DIR, UPDATED_SESSIONS_DIR
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
@@ -40,14 +42,14 @@ app.include_router(kb_router)
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}
 
-# output 保存每个会话最终工作区，前端只允许从这里浏览和下载生成文件
-# 统一落在仓库根：与 RAG import pipeline 的 PROJECT_ROOT/output 约定一致，
-# 不再使用 app 目录下的 output，避免项目内出现两个 output 根
-output_dir = PROJECT_ROOT / "output"
+# output 保存每个会话最终工作区与知识库产物，前端只允许从这里浏览和下载生成文件。
+# 目录契约统一由 app.core.runtime_paths 定义（sessions/ + kb/ + 交付文档），
+# 本模块只消费 OUTPUT_DIR，不再自行拼接 PROJECT_ROOT/output，避免结构变更时漏改。
+output_dir = OUTPUT_DIR
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# updated 暂存用户上传文件，run_deep_agent 启动时会复制到对应 output/session_xxx
-updated_dir = PROJECT_ROOT / "updated"
+# updated 暂存用户上传文件，run_deep_agent 启动时会复制到对应 output/sessions/session_xxx
+updated_dir = UPDATED_SESSIONS_DIR
 updated_dir.mkdir(parents=True, exist_ok=True)
 
 # 教学项目通常前后端分别本地启动，这里放开跨域以便 Vite 页面直接调用 API
@@ -93,6 +95,10 @@ async def run_task(request: TaskRequest):
     if old_task and not old_task.done():
         old_task.cancel()
 
+    # 清除上一次执行可能残留的取消标志：取消是「针对那一次执行」的，
+    # 否则同一 thread_id 的新任务会在第一个节点边界被误杀
+    reset_cancel(thread_id)
+
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
     task = asyncio.create_task(run_deep_agent(request.query, thread_id))
     active_tasks[thread_id] = task
@@ -114,20 +120,28 @@ async def cancel_task(thread_id: str):
         active_tasks.pop(thread_id, None)
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
 
-    # 先发出取消信号，再短暂等待协程响应；若底层阻塞中，则返回 cancelling 给前端继续展示状态
+    # 先置位协作式取消标志：它能穿透线程池，让正在跑的同步节点在**下一个节点边界**
+    # 主动退出（asyncio.Task.cancel() 本身无法打断线程池里的同步调用）
+    request_cancel(thread_id)
+
+    # 再发出 asyncio 层取消信号，并短暂等待协程响应
     task.cancel()
     try:
         await asyncio.wait_for(task, timeout=1.0)
     except asyncio.CancelledError:
         _forget_task(thread_id, task)
+        clear_cancel(thread_id)
         return {"status": "cancelled", "thread_id": thread_id}
     except asyncio.TimeoutError:
+        # 底层同步节点仍在执行，取消标志已置位，下一个节点边界即会退出
         return {"status": "cancelling", "thread_id": thread_id}
     except Exception as e:
         _forget_task(thread_id, task)
+        clear_cancel(thread_id)
         return {"status": "cancelled", "thread_id": thread_id, "message": str(e)}
 
     _forget_task(thread_id, task)
+    clear_cancel(thread_id)
     return {"status": "cancelled", "thread_id": thread_id}
 
 
@@ -138,7 +152,7 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
 
     目标：
     1. 接收用户上传的一个或多个文件。
-    2. 保存到 `updated/session_{thread_id}` 目录。
+    2. 保存到 `updated/sessions/session_{thread_id}` 目录。
     3. 供 Agent 在后续任务中读取和分析。
 
     Args:
@@ -202,7 +216,7 @@ async def list_files(path: str):
     Args:
         path (str): 目标目录的绝对路径 (必须在 output 目录下)。
     """
-    print(f"[DEBUG] 请求文件列表: {path}")
+    logger.debug(f"[files] 请求文件列表：{path}")
 
     try:
         # 和下载接口保持同一条安全边界：前端只能查看 output 目录内部内容
@@ -210,11 +224,11 @@ async def list_files(path: str):
         output_abs = output_dir.resolve()
 
         if not abs_path.is_relative_to(output_abs):
-            print(f"[ERROR] 拒绝访问: {abs_path} 不在 {output_abs} 目录下")
+            logger.warning(f"[files] 拒绝访问：{abs_path} 不在 {output_abs} 目录下")
             return {"error": "拒绝访问: 只能访问输出目录下的文件"}
 
     except Exception as e:
-        print(f"[ERROR] 路径解析失败: {e}")
+        logger.warning(f"[files] 路径解析失败：{e}")
         return {"error": f"路径无效: {e}"}
 
     if not abs_path.exists():
@@ -237,12 +251,12 @@ async def list_files(path: str):
                 )
 
     except Exception as e:
-        print(f"[ERROR] 遍历文件失败: {e}")
+        logger.warning(f"[files] 遍历文件失败：{e}")
         return {"error": str(e)}
 
     # 最新生成的文件排在前面，方便用户优先看到本次任务产物
     files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
-    print(f"[DEBUG] 找到 {len(files)} 个文件")
+    logger.debug(f"[files] 找到 {len(files)} 个文件")
     return {"files": files}
 
 
@@ -255,7 +269,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     发送事件时只需要按 thread_id 查找连接，就能把进度推给对应页面。循环中的
     receive_text 用于接收前端心跳，避免连接空闲断开。
     """
-    print(f"会话向我们发起了请求，要求建立连接：{thread_id} 对应：{websocket}")
+    logger.info(f"[WS] 会话发起连接：thread_id={thread_id}")
 
     # 连接建立后立即按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
     await manager.connect(websocket, thread_id)
@@ -271,10 +285,10 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except WebSocketDisconnect:
         # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接
         manager.disconnect(websocket, thread_id)
-        print(f"[WebSocket] 客户端已断开: {thread_id}")
+        logger.info(f"[WS] 客户端已断开：thread_id={thread_id}")
 
     except Exception as e:
-        print(f"[WebSocket] 连接异常: {e}")
+        logger.warning(f"[WS] 连接异常：{e}")
         manager.disconnect(websocket, thread_id)
 
 
