@@ -13,6 +13,7 @@ from typing import Any, Optional
 from fastapi import WebSocket
 
 from app.api.context import get_thread_context
+from app.core.logger import logger
 
 
 class ToolMonitor:
@@ -64,7 +65,7 @@ class ToolMonitor:
                 if manager_loop and thread_id:
                     self._send_to_websocket(payload, thread_id, manager_loop)
             except Exception as e:
-                print(f"[Monitor] WebSocket send failed: {e}")
+                logger.warning(f"[Monitor] WebSocket 推送失败：{e}")
 
         # DeepAgents 脚本调试时，如果运行时暴露了 stream_writer，也同步写入流式输出
         if hasattr(builtins, "runtime") and hasattr(builtins.runtime, "stream_writer"):
@@ -73,8 +74,8 @@ class ToolMonitor:
             except Exception:
                 pass
 
-        # 控制台保底输出，便于无前端场景下观察执行过程
-        print(f"\n[Monitor:{event_type}] {message}")
+        # 统一走 loguru：无前端场景下也能在日志文件中观察执行过程
+        logger.debug(f"[Monitor:{event_type}] {message}")
 
     def _send_to_websocket(
         self,
@@ -172,21 +173,21 @@ class ConnectionManager:
         """绑定 FastAPI 主事件循环，并同步注册到 monitor"""
         self.loop = loop
         monitor.set_websocket_manager(self)
-        print(f"[Monitor] ConnectionManager manually bound to loop: {id(self.loop)}")
+        logger.debug(f"[Monitor] ConnectionManager 已绑定事件循环：{id(self.loop)}")
 
     async def connect(self, websocket: WebSocket, thread_id: str) -> None:
         """接受 WebSocket 连接，并按 thread_id 保存"""
         await websocket.accept()
         self.active_connections[thread_id] = websocket
-        print(f"Client connected: {thread_id}")
+        logger.info(f"[WS] 客户端已连接：thread_id={thread_id}")
 
     def disconnect(self, websocket: WebSocket, thread_id: str) -> None:
         """移除已经断开的 WebSocket 连接"""
         if self.active_connections.get(thread_id) is websocket:
             del self.active_connections[thread_id]
-            print(f"Client disconnected: {thread_id}")
+            logger.info(f"[WS] 客户端已断开：thread_id={thread_id}")
         else:
-            print(f"Stale websocket disconnected, current connection kept: {thread_id}")
+            logger.debug(f"[WS] 过期连接已忽略，保留当前连接：thread_id={thread_id}")
 
     async def send_personal_message(self, message: str, websocket: WebSocket) -> None:
         """向指定 WebSocket 发送纯文本消息"""
