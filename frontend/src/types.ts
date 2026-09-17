@@ -67,6 +67,10 @@ export interface KbImportTaskBrief {
   task_id: string;
   file_name: string;
   file_size: number;
+  /** 受理时后端已登记的完成节点（中文名），前端据此立即点亮进度轨首格 */
+  done_list?: string[];
+  /** 产物目录（output/kb/{task_id}），受理时即已知，供前端直接浏览本次导入产物 */
+  output_dir?: string;
 }
 
 export interface KbImportResponse {
@@ -84,6 +88,8 @@ export interface KbTaskStatus {
   running_list: string[];
   file_name: string;
   file_size: number;
+  /** 产物目录（output/kb/{task_id}），供前端浏览本次导入的全部产物 */
+  output_dir?: string;
   thread_id: string;
   created_at: number;
   error: string;
