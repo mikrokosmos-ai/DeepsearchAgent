@@ -4,10 +4,6 @@
 负责读取 app/prompts/agents.yml 中的主智能体和子智能体配置，
 组装 DeepAgent 时直接复用 main_agent_content / sub_agents_content。
 
-职责边界（为什么不在 app/conf/）：
-    app/conf/ 只承载「从 .env 读取的连接信息与业务可调参数」；本模块读的是
-    agents.yml 里的提示词文本，属于提示词资产，因此与 loader.py 同处
-    app/prompts/，构成「模板加载 + 智能体配置加载」两个对称入口。
 """
 
 from pathlib import Path
