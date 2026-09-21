@@ -299,7 +299,7 @@ def step_3_generate_response(state: QueryGraphState, prompt: str) -> QueryGraphS
             logger.info(f"流式输出完成，总长度: {len(final_text)}")
 
         except Exception as e:
-            logger.error(f"流式生成出错: {e}", exc_info=True)
+            logger.exception(f"流式生成出错: {e}")
             # 发生错误时，尝试推送到前端
             push_to_session(trace_key, SSEEvent.ERROR, {"error": str(e)})
 
@@ -314,7 +314,7 @@ def step_3_generate_response(state: QueryGraphState, prompt: str) -> QueryGraphS
             set_task_result(trace_key, "answer", content)
             logger.info(f"生成回答完成，长度: {len(content)}")
         except Exception as e:
-            logger.error(f"生成回答出错: {e}", exc_info=True)
+            logger.exception(f"生成回答出错: {e}")
             state["answer"] = "抱歉，生成回答时出现错误。"
 
     return state

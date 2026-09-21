@@ -63,4 +63,5 @@ query_graph.add_edge("node_rrf", "node_rerank")
 query_graph.add_edge("node_rerank", "node_answer_output")
 query_graph.add_edge("node_answer_output", END)
 # 6. 编译对象即可
-query_app = query_graph.compile()
+# 本图不需要持久化：它由工具调用触发、一次调用即完整跑完，没有中断/恢复需求。
+query_app = query_graph.compile(checkpointer=False)

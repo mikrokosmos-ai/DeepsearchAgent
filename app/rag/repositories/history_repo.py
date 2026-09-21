@@ -26,7 +26,7 @@ def clear_history(session_id: str) -> int:
         logger.info(f"已清空会话历史：session={session_id}，删除 {result.deleted_count} 条")
         return result.deleted_count
     except Exception as e:
-        logger.error(f"清空会话历史失败：session={session_id}，原因：{e}", exc_info=True)
+        logger.exception(f"清空会话历史失败：session={session_id}，原因：{e}")
         return 0
 
 
@@ -104,13 +104,13 @@ def update_message_item_names(ids: List[str], item_names: List[str]) -> int:
         logger.info(f"已回填历史记录商品名：更新 {result.modified_count} 条，item_names={item_names}")
         return result.modified_count
     except Exception as e:
-        logger.error(f"批量更新历史记录商品名失败：{e}", exc_info=True)
+        logger.exception(f"批量更新历史记录商品名失败：{e}")
         return 0
 
 
 def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
-    查询指定会话的最近 N 条对话记录，返回原始字典格式
+    查询指定会话的最近 N 条对话记录，返回清洗后的字典列表（不含 Mongo 内部字段）
 
     结果按时间正序排列，可直接喂给 LLM 作为上下文。
 
@@ -121,11 +121,21 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
     mongo_tool = get_history_mongo_tool()
     try:
         query = {"session_id": session_id}
+        # 字段投影：显式列出下游所需字段
+        projection = {
+            "_id": 0,
+            "role": 1,
+            "text": 1,
+            "rewritten_query": 1,
+            "item_names": 1,
+            "image_urls": 1,
+            "ts": 1,
+        }
         # 按时间戳降序取最近 limit 条，再反转为正序
-        cursor = mongo_tool.chat_message.find(query).sort("ts", -1).limit(limit)
+        cursor = mongo_tool.chat_message.find(query, projection).sort("ts", -1).limit(limit)
         messages = list(cursor)
         messages.reverse()
         return messages
     except Exception as e:
-        logger.error(f"查询会话历史失败：session={session_id}，原因：{e}", exc_info=True)
+        logger.exception(f"查询会话历史失败：session={session_id}，原因：{e}")
         return []

@@ -78,7 +78,7 @@ def _run(cypher: str, **params) -> List[Dict[str, Any]]:
             result = session.run(cypher, **params)
             return [dict(record) for record in result]
     except Exception as e:
-        logger.error(f"Neo4j Cypher 执行失败：{e}", exc_info=True)
+        logger.exception(f"Neo4j Cypher 执行失败：{e}")
         raise Neo4jError.wrap(e, node_name="graph_repo") from e
 
 

@@ -314,9 +314,8 @@ def node_import_kg(state: ImportGraphState) -> ImportGraphState:
         step_7_backup_data(state, entities, relations)
         state["kg_result"] = {"entities": len(entities), "relations": len(relations)}
     except Exception as e:
-        logger.warning(
+        logger.opt(exception=True).warning(
             f"[{state.get('task_id')}] 知识图谱导入失败，已跳过（不影响切片向量入库）：{e}",
-            exc_info=True,
         )
         state["kg_result"] = {"entities": 0, "relations": 0, "error": str(e)}
 

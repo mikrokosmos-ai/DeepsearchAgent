@@ -123,4 +123,4 @@ if __name__ == "__main__":
         chunks = result.get("embedding_chunks", [])
         print(f"\n>>> 测试完成！检索到 {len(chunks)} 条结果")
     except Exception as e:
-        logger.error(f"测试运行失败: {e}", exc_info=True)
+        logger.exception(f"测试运行失败: {e}")

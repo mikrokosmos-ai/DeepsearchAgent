@@ -107,4 +107,4 @@ if __name__ == '__main__':
         result_chunks = result_state.get("chunks", [])
         logger.info(f"待处理切片数：2 | 实际处理切片数：{len(result_chunks)}")
     except Exception as e:
-        logger.error(f"=== 向量化节点本地测试失败 ===" f"错误原因：{str(e)}", exc_info=True)
+        logger.exception(f"=== 向量化节点本地测试失败 ===" f"错误原因：{str(e)}")

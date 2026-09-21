@@ -5,14 +5,6 @@
 同时提供 node_log / node_guard 两个节点装饰器，为后续 LangGraph 节点提供
 统一的「执行耗时记录」与「异常归一化」能力。
 
-设计说明：
-    1. 直接使用 loguru 原生的 {name}:{function}:{line} 占位符定位调用点。
-       loguru 内部已做了调用栈处理，无需自行遍历 inspect.stack()——后者在每次
-       日志写入时都会构建完整帧列表，高频日志下开销显著。
-    2. node_guard 与 node_log 的**书写顺序为 node_guard 在外、node_log 在内**：
-       Python 装饰器自下而上应用，因此 node_log 先包裹原函数（记录原始堆栈后原样
-       re-raise），node_guard 再包裹一层做归一化。顺序写反会导致日志里只看到
-       归一化后的 AppError 堆栈，反而丢失根因信息。
 """
 
 import inspect

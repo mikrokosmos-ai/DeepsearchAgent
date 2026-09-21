@@ -32,6 +32,7 @@ from app.api.lifespan import lifespan
 from app.api.monitor import manager
 from app.core.cancel import clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
+from app.core.tool_failfast import reset_tool_failures
 from app.core.runtime_paths import OUTPUT_DIR, UPDATED_SESSIONS_DIR
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
@@ -98,6 +99,9 @@ async def run_task(request: TaskRequest):
     # 清除上一次执行可能残留的取消标志：取消是「针对那一次执行」的，
     # 否则同一 thread_id 的新任务会在第一个节点边界被误杀
     reset_cancel(thread_id)
+
+    # 同理重置工具故障熔断标记：thread_id 由前端 localStorage 持久化、跨天复用，
+    reset_tool_failures(thread_id)
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
     task = asyncio.create_task(run_deep_agent(request.query, thread_id))

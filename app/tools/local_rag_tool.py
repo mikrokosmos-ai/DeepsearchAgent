@@ -26,11 +26,15 @@ from app.api.context import get_thread_context
 from app.api.monitor import monitor
 from app.api.rag_event_bridge import RagEventBridge
 from app.core.logger import logger
+from app.core.tool_failfast import get_tool_failure, mark_tool_failed
 from app.rag.pipelines.query_pipeline.graph import query_app
 from app.rag.pipelines.query_pipeline.state import create_query_default_state
 
 # 取不到 DeepAgents 会话上下文时的兜底会话名：保证工具仍可用（只是历史聚合到同一会话）
 _DEFAULT_SESSION = "local_kb_default"
+
+# 故障熔断标记用的工具名（与 @tool 注册名保持一致）
+_TOOL_NAME = "local_rag_search"
 
 @tool
 def local_rag_search(question: str) -> str:
@@ -48,6 +52,19 @@ def local_rag_search(question: str) -> str:
     #   task_id    —— 每次工具调用唯一，作为 SSE 队列 key，避免并发调用互相串台。
     session_id = get_thread_context() or _DEFAULT_SESSION
     task_id = f"{session_id}#{uuid4().hex[:8]}"
+
+    # 失败短路：本任务内该工具已确认故障 → 直接返回，不再执行检索链路。
+    previous_failure = get_tool_failure(session_id, _TOOL_NAME)
+    if previous_failure:
+        logger.warning(
+            f"本地知识库检索已短路（本任务内该工具已故障）：session_id={session_id}，"
+            f"首次失败原因：{previous_failure}"
+        )
+        return (
+            f"本地知识库检索失败，错误原因：{previous_failure}"
+            "（该故障在本任务内已确认，重复调用不会成功。请勿重试，"
+            "请如实向主智能体上报本次故障。）"
+        )
 
     try:
         # 埋点：与其它工具一致，前端可据此展示「正在执行本地知识库检索」
@@ -76,7 +93,10 @@ def local_rag_search(question: str) -> str:
         return answer
     except Exception as e:
         # 其它失败不应中断整个智能体任务：转成中文提示交给模型继续处理
-        logger.error(f"本地知识库检索失败：task_id={task_id}，原因：{e}", exc_info=True)
+        logger.exception(f"本地知识库检索失败：task_id={task_id}，原因：{e}")
+        # 标记本任务内该工具已故障 → 后续调用在入口直接短路，杜绝重试风暴。
+        # 键必须是 session_id（thread_id），不能用 task_id（见 app/core/tool_failfast.py）
+        mark_tool_failed(session_id, _TOOL_NAME, str(e))
         return f"本地知识库检索失败，错误原因：{str(e)}"
 
 

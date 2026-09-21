@@ -25,6 +25,7 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
+from app.core.tool_failfast import clear_tool_failures
 from app.core.paths import PROJECT_ROOT
 # 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
 # 「函数作用域内存在赋值」而被 Python 判定为局部变量 → 调用处 UnboundLocalError。
@@ -179,6 +180,8 @@ async def run_deep_agent(task_query, session_id):
         reset_session_context(session_dir_token, session_id_token)
         # 清理协作式取消标志，避免内存态随会话数累积
         clear_cancel(session_id)
+        # 一并清理工具故障熔断标记（与 clear_cancel 同一生命周期边界）
+        clear_tool_failures(session_id)
 
 
 if __name__ == "__main__":

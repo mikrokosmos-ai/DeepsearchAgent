@@ -149,7 +149,7 @@ def node_query_kg(state):
         kg_chunks, description = step_4_build_kg_evidence(triples)
     except Exception as e:
         # 知识图谱是可选能力：失败只告警，让查询继续走其余三路
-        logger.warning(f"知识图谱检索失败，已跳过该路召回：{e}", exc_info=True)
+        logger.opt(exception=True).warning(f"知识图谱检索失败，已跳过该路召回：{e}")
         kg_chunks, triples, description = [], [], ""
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 与其它并行分支保持一致：只返回本路产出的字段（由 LangGraph 合并进全局 state）

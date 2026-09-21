@@ -222,4 +222,4 @@ if __name__ == "__main__":
         logger.info(f"最终识别商品名称：{result_state.get('item_name')}")
         logger.info(f"切片数量：{len(result_state.get('chunks', []))}")
     except Exception as e:
-        logger.error(f"商品名称识别节点本地测试失败，原因：{str(e)}", exc_info=True)
+        logger.exception(f"商品名称识别节点本地测试失败，原因：{str(e)}")

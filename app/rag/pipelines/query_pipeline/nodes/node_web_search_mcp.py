@@ -107,7 +107,7 @@ def node_web_search_mcp(state):
     except Exception as e:
         # 联网检索是可选补充能力：远端 MCP 超时/限流/返回结构异常时只告警，
         # 返回空结果让查询继续走其余三路召回（不阻断主链路）。
-        logger.warning(f"联网搜索失败，已跳过该路召回：{e}", exc_info=True)
+        logger.opt(exception=True).warning(f"联网搜索失败，已跳过该路召回：{e}")
         pages = []
     # 记录任务结束
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
