@@ -10,6 +10,7 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 收敛为本地 query pipeline 的单一入口，因此只需要一个工具。
 """
 
+from app.agent.subagent_contract import make_subagent_response_format
 from app.prompts.agent_loader import sub_agents_content
 from app.tools.local_rag_tool import local_rag_search
 
@@ -21,4 +22,5 @@ local_knowledge_agent = {
     "description": sub_agents_content["local_kb"]["description"],
     "system_prompt": sub_agents_content["local_kb"]["system_prompt"],
     "tools": [local_rag_search],
+    "response_format": make_subagent_response_format(),
 }
