@@ -42,10 +42,18 @@ from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
 from app.tools.upload_file_read_tool import read_file_content
 
-# 关掉 DeepAgents 自动注入的 general-purpose 默认体。
+
+VIRTUAL_FS_TOOLS = frozenset(
+    {"ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute"}
+)
+
+# 一次性注册本项目的运行时策略（键用 provider，避免 .env 里模型改名后静默失配）：
 register_harness_profile(
     "openai",
-    HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)),
+    HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+        excluded_tools=VIRTUAL_FS_TOOLS,
+    ),
 )
 
 # 主智能体是调度中心：
