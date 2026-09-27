@@ -10,11 +10,17 @@ import asyncio
 import shutil
 
 from deepagents import create_deep_agent
+from deepagents.profiles import (
+    GeneralPurposeSubagentProfile,
+    HarnessProfile,
+    register_harness_profile,
+)
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.llm import model
 from app.prompts.agent_loader import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
+from app.agent.subagents.general_purpose_agent import general_purpose_agent
 from app.agent.subagents.local_knowledge_agent import local_knowledge_agent
 from app.agent.subagents.network_search_agent import network_search_agent
 from app.api.context import (
@@ -36,16 +42,27 @@ from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
 from app.tools.upload_file_read_tool import read_file_content
 
+# 关掉 DeepAgents 自动注入的 general-purpose 默认体。
+register_harness_profile(
+    "openai",
+    HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)),
+)
+
 # 主智能体是调度中心：
 # 1. tools 只放最终交付相关的文件工具
-# 2. subagents 放网络、数据库、本地知识库三类信息获取助手
+# 2. subagents 放网络、数据库、本地知识库三类信息获取助手，外加一个受约束的通用整理助手
 # 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
     tools=[generate_markdown, convert_md_to_pdf, read_file_content],
     checkpointer=InMemorySaver(),
-    subagents=[database_query_agent, network_search_agent, local_knowledge_agent],
+    subagents=[
+        general_purpose_agent,
+        database_query_agent,
+        network_search_agent,
+        local_knowledge_agent,
+    ],
 )
 
 # 会话工作区与上传暂存的目录契约统一由 app.core.runtime_paths 提供，
