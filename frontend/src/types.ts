@@ -60,6 +60,19 @@ export interface UploadedItem {
   raw: File;
 }
 
+/** 主智能体的一条问答消息（P1-6：落库后可在断线/刷新后回读） */
+export interface SessionHistoryMessage {
+  role: "user" | "assistant" | string;
+  text: string;
+  ts: number;
+}
+
+/** GET /api/history/{thread_id} 的响应 */
+export interface SessionHistoryResponse {
+  thread_id: string;
+  messages: SessionHistoryMessage[];
+}
+
 /* ========================= 知识库导入（/api/kb/*）========================= */
 
 /** 后端受理导入后返回的单条任务摘要 */

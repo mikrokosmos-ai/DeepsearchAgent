@@ -1,5 +1,11 @@
 import { API_BASE_URL } from "./config";
-import type { CancelTaskResponse, FileListResponse, TaskResponse, UploadResponse } from "../types";
+import type {
+  CancelTaskResponse,
+  FileListResponse,
+  SessionHistoryResponse,
+  TaskResponse,
+  UploadResponse
+} from "../types";
 
 export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
@@ -66,4 +72,11 @@ export function getDownloadUrl(path: string): string {
   const url = new URL(apiUrl("/api/download"));
   url.searchParams.set("path", path);
   return url.toString();
+}
+
+/** 读取某个会话的主智能体问答历史（P1-6：断线 / 刷新后回读最终结果） */
+export async function fetchSessionHistory(threadId: string): Promise<SessionHistoryResponse> {
+  return requestJson<SessionHistoryResponse>(
+    apiUrl(`/api/history/${encodeURIComponent(threadId)}`)
+  );
 }

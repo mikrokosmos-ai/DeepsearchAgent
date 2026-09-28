@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import { cancelTask, fetchSessionHistory, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -96,6 +96,25 @@ export function useDeepAgentSession() {
             socket.send("ping");
           }
         }, 25000);
+
+        // P1-6：最终答案此前只走 WebSocket 推送，刷新/断线后就永久看不到。
+        // 连上后从后端回读最近一次助手回复补进结果区；只在自己还没有结果时补，
+        // 避免覆盖正在流式推送的新结果。回读失败不影响实时链路。
+        fetchSessionHistory(threadId)
+          .then((history) => {
+            if (disposed) {
+              return;
+            }
+            const lastAssistant = [...history.messages]
+              .reverse()
+              .find((message) => message.role === "assistant" && message.text);
+            if (lastAssistant) {
+              setResult((previous) => previous || lastAssistant.text);
+            }
+          })
+          .catch(() => {
+            /* 历史回读失败属可接受降级，不打扰用户 */
+          });
       };
 
       socket.onmessage = (event) => {

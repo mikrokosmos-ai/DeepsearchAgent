@@ -6,7 +6,6 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 决定是否把公开网络信息查询任务分派给它。
 """
 
-from app.agent.subagent_contract import make_subagent_response_format
 from app.prompts.agent_loader import sub_agents_content
 from app.tools.tavily_tool import internet_search
 
@@ -17,5 +16,4 @@ network_search_agent = {
     "description": sub_agents_content["tavily"]["description"],
     "system_prompt": sub_agents_content["tavily"]["system_prompt"],
     "tools": [internet_search],
-    "response_format": make_subagent_response_format(),
 }

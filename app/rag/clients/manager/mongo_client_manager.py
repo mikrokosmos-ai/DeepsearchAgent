@@ -15,6 +15,9 @@ from app.core.logger import logger
 # 会话历史集合名：按 session_id 查询某次对话的全部消息
 CHAT_MESSAGE_COLLECTION = "chat_message"
 
+# 主智能体会话集合名：只存「主智能体」这一层的人机问答。
+AGENT_MESSAGE_COLLECTION = "agent_message"
+
 
 class HistoryMongoTool:
     """
@@ -35,9 +38,12 @@ class HistoryMongoTool:
         self.client = MongoClient(self.mongo_url, serverSelectionTimeoutMS=5000)
         self.db = self.client[self.db_name]
         self.chat_message = self.db[CHAT_MESSAGE_COLLECTION]
+        # 主智能体的问答历史（与 RAG 多轮历史分离，见上方常量注释）
+        self.agent_message = self.db[AGENT_MESSAGE_COLLECTION]
 
         # 复合索引：session_id 升序 + ts 降序，匹配「按会话取最新消息」这一核心查询
         self.chat_message.create_index([("session_id", 1), ("ts", -1)])
+        self.agent_message.create_index([("session_id", 1), ("ts", -1)])
 
         logger.info(f"MongoDB 连接成功：{self.db_name}")
 

@@ -34,6 +34,8 @@ from app.core.cancel import clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
 from app.core.tool_failfast import reset_tool_failures
 from app.core.runtime_paths import OUTPUT_DIR, UPDATED_SESSIONS_DIR
+# 主智能体问答历史的回读入口（与 RAG 多轮历史分离的独立集合）
+from app.rag.repositories.history_repo import get_agent_messages
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
@@ -262,6 +264,23 @@ async def list_files(path: str):
     files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
     logger.debug(f"[files] 找到 {len(files)} 个文件")
     return {"files": files}
+
+
+@app.get("/api/history/{thread_id}")
+async def get_session_history(thread_id: str):
+    """
+    读取指定会话的主智能体问答历史 。
+
+    用途：最终答案此前**只经 WebSocket 推送**，页面刷新或断线重连后就永久看不到了。
+    现在 run_deep_agent 会把用户提问与最终答案落库（`agent_message` 集合），
+    前端重连后调用本接口即可回读。
+
+    :param thread_id: 会话 ID（即任务 thread_id）
+    :return: {"thread_id":..., "messages":[{"role":"user"|"assistant","text":...,"ts":...}]}
+    """
+    # Mongo 读取是同步阻塞调用，放到线程里执行，避免卡住事件循环
+    messages = await asyncio.to_thread(get_agent_messages, thread_id)
+    return {"thread_id": thread_id, "messages": messages}
 
 
 @app.websocket("/ws/{thread_id}")

@@ -36,6 +36,8 @@ from app.core.paths import PROJECT_ROOT
 # 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
 # 「函数作用域内存在赋值」而被 Python 判定为局部变量 → 调用处 UnboundLocalError。
 from app.core.runtime_paths import UPDATED_SESSIONS_DIR, session_dir as resolve_session_dir
+# 主智能体的问答历史（独立集合 agent_message，与 RAG 多轮历史分离）
+from app.rag.repositories.history_repo import save_agent_message
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -147,6 +149,9 @@ async def run_deep_agent(task_query, session_id):
             monitor.report_task_cancelled()
             return
 
+        # P1-6：把用户提问落库，使刷新/断线后仍能看到完整问答（写入失败不影响任务）
+        save_agent_message(session_id, "user", task_query)
+
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
         async for chunk in main_agent.astream(
             {"messages": [{"role": "user", "content": task_query + path_instruction}]},
@@ -184,6 +189,8 @@ async def run_deep_agent(task_query, session_id):
                             logger.info(
                                 f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
                             )
+                            # P1-6：先落库再推送 —— 前端刷新/断线后可从 /api/history 回读
+                            save_agent_message(session_id, "assistant", last_msg.content)
                             monitor.report_task_result(last_msg.content)
 
     except TaskCancelledError as e:

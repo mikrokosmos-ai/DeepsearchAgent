@@ -2,16 +2,21 @@
 子智能体的统一返回契约
 """
 
-from langchain.agents.structured_output import ToolStrategy
-from pydantic import BaseModel, Field
+import json
+import re
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # 字段名是本契约的一部分：父层提示词、子层提示词与回归守卫都按这四个名字对齐，
 # 改名属于破坏性变更（守卫会拦住）。
 REPORT_FIELDS = ("result", "sources", "truncated_by_limit", "error")
 
+# 框架级强制（response_format）在本项目端点上是否可用。守卫据此断言子智能体**不得**配置它。
+FRAMEWORK_RESPONSE_FORMAT_USABLE = False
+
 
 class SubAgentReport(BaseModel):
-    """检索子智能体返回给主智能体的结构化报告。"""
+    """检索子智能体返回给主智能体的结构化报告（字段形状即契约）。"""
 
     result: str = Field(
         description=(
@@ -42,24 +47,83 @@ class SubAgentReport(BaseModel):
         ),
     )
 
+    @field_validator("error", mode="before")
+    @classmethod
+    def _normalize_error(cls, value):
+        """
+        把"空故障"归一成 None。
 
-def make_subagent_response_format() -> ToolStrategy:
-    """
-    构造一个新的 `ToolStrategy` 实例。
+        真模型实测：即使提示词写明"没有故障时必须为 null"，它仍会写成 `""` 或 `"null"`。
+        若原样保留，父层会以为"有故障信息"从而触发失败降级 —— 属于必须挡住的假信号。
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text == "" or text.lower() in {"null", "none", "无", "n/a", "na"}:
+            return None
+        return text
 
-    每次调用返回新实例（而不是共用一个模块级单例）：三个子智能体各自持有一份，
-    避免将来框架在策略对象上挂载 per-agent 状态时互相干扰。
+
+# 匹配 ```json {...} ``` 代码块；也接受没有语言标记的 ``` {...} ```
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def parse_report_from_text(text: str) -> SubAgentReport | None:
     """
-    return ToolStrategy(SubAgentReport)
+    从子智能体的回复文本里解析出契约对象。
+
+    容错顺序：① 最后一个 ```json 代码块 → ② 文中最后一个裸 JSON 对象。
+    解析或校验失败时返回 None（调用方应退化为"按正文理解"，**不要**因此判定任务失败）。
+
+    :param text: 子智能体的回复文本
+    :return: SubAgentReport 或 None
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    candidates: list[str] = []
+    blocks = _FENCED_JSON_RE.findall(text)
+    if blocks:
+        candidates.append(blocks[-1])  # 取最后一个：模型可能先给示例再给结论
+
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start : end + 1])
+
+    for raw in candidates:
+        try:
+            return SubAgentReport.model_validate(json.loads(raw))
+        except (json.JSONDecodeError, ValidationError):
+            continue
+    return None
 
 
 if __name__ == "__main__":
-    # 离线自检：schema 字段名与契约常量一致，且能被序列化成 JSON
-    import json
+    # 离线自检：字段名不漂移、解析器对正/反样例的行为正确
+    assert tuple(SubAgentReport.model_fields.keys()) == REPORT_FIELDS, "字段漂移"
+    assert FRAMEWORK_RESPONSE_FORMAT_USABLE is False, "端点已支持框架级强制？请重新评估本模块结论"
 
-    names = tuple(SubAgentReport.model_fields.keys())
-    print("契约字段 =", names)
-    assert names == REPORT_FIELDS, f"字段漂移：{names} != {REPORT_FIELDS}"
-    print("示例序列化 =", SubAgentReport(result="结论", sources=["drugs"], error=None).model_dump_json(ensure_ascii=False))
+    ok = [
+        '结论如下。\n```json\n{"result":"A","sources":["drugs"],"truncated_by_limit":false,"error":null}\n```',
+        '{"result":"B","sources":[],"truncated_by_limit":true,"error":null}',
+        '先给一个示例 {"result":"x"}，再给结论：\n```json\n{"result":"C","sources":["a.pdf"],"truncated_by_limit":false,"error":"链路故障"}\n```',
+    ]
+    expect = ["A", "B", "C"]  # 第三个必须取**最后**一个块（C），不能取示例 x
+    for text, want in zip(ok, expect):
+        got = parse_report_from_text(text)
+        assert got is not None and got.result == want, f"解析失败：期望 {want}，得到 {got}"
+        print(f"  OK  -> {want}")
+
+    for bad in ["", "没有 JSON", "```json\n{不是合法JSON}\n```", "```json\n{\"result\":123}\n```"]:
+        got = parse_report_from_text(bad)
+        assert got is None, f"非法输入不应解析成功：{bad!r} -> {got}"
+        print(f"  OK  -> 正确拒绝 {bad!r}")
+
+    # 空故障归一化：模型实测会写 "" / "null"，不能让它被当成真故障
+    for empty in ["", "  ", "null", "None", "无"]:
+        r = SubAgentReport(result="x", error=empty)
+        assert r.error is None, f"空故障未归一化：{empty!r} -> {r.error!r}"
+    assert SubAgentReport(result="x", error="查询出现异常：连接超时").error is not None
+    print("  OK  -> 空故障归一化为 None，真实故障保留")
+
     print("OK")
-    _ = json  # 仅用于说明可用标准库校验，无需额外依赖

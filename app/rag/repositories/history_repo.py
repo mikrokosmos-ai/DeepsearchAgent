@@ -139,3 +139,55 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
     except Exception as e:
         logger.exception(f"查询会话历史失败：session={session_id}，原因：{e}")
         return []
+
+
+
+# 主智能体会话历史（P1-6）
+def save_agent_message(session_id: str, role: str, text: str) -> bool:
+    """
+    保存主智能体这一层的一条问答消息（用户提问 / 最终回答）。
+    :return: 是否写入成功
+    """
+    if not session_id or not str(text or "").strip():
+        return False
+    try:
+        mongo_tool = get_history_mongo_tool()
+        mongo_tool.agent_message.insert_one(
+            {
+                "session_id": session_id,
+                "role": role,
+                "text": text,
+                "ts": datetime.now().timestamp(),
+            }
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"保存主智能体消息失败（不影响任务本身）：session={session_id}，原因：{e}")
+        return False
+
+
+def get_agent_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    读取指定会话的主智能体问答历史（按时间正序）。
+
+    用于 WebSocket 断线 / 页面刷新后回读最终结果 —— 这是 P1-6 的"可回读"入口。
+
+    :param session_id: 会话唯一标识（即 thread_id）
+    :param limit: 最多返回多少条（默认 50）
+    :return: [{"role": "user"|"assistant", "text": str, "ts": float}, ...]；失败返回空列表
+    """
+    mongo_tool = get_history_mongo_tool()
+    try:
+        cursor = (
+            mongo_tool.agent_message.find(
+                {"session_id": session_id}, {"_id": 0, "role": 1, "text": 1, "ts": 1}
+            )
+            .sort([("ts", -1), ("_id", -1)])
+            .limit(limit)
+        )
+        messages = list(cursor)
+        messages.reverse()
+        return messages
+    except Exception as e:
+        logger.warning(f"读取主智能体历史失败：session={session_id}，原因：{e}")
+        return []
