@@ -10,15 +10,18 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 收敛为本地 query pipeline 的单一入口，因此只需要一个工具。
 """
 
+from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.prompts.agent_loader import sub_agents_content
 from app.tools.local_rag_tool import local_rag_search
 
 # 本地知识库子智能体处理企业内部非结构化文档，与网络搜索助手、数据库查询助手形成互补
 # 字典式子智能体的核心字段来自 YAML，便于后续只改配置就能调整路由描述和行为约束
 # tools 列表声明该子智能体可以调用的真实能力：本地知识库检索
+# middleware：会话级次数护栏（local_rag_search 上限 5 次）
 local_knowledge_agent = {
     "name": sub_agents_content["local_kb"]["name"],
     "description": sub_agents_content["local_kb"]["description"],
     "system_prompt": sub_agents_content["local_kb"]["system_prompt"],
     "tools": [local_rag_search],
+    "middleware": [ToolBudgetMiddleware()],
 }

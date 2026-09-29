@@ -18,6 +18,7 @@ from deepagents.profiles import (
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.llm import model
+from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.prompts.agent_loader import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
 from app.agent.subagents.general_purpose_agent import general_purpose_agent
@@ -32,6 +33,7 @@ from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
 from app.core.tool_failfast import clear_tool_failures
+from app.core.tool_budget import clear_budgets
 from app.core.paths import PROJECT_ROOT
 # 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
 # 「函数作用域内存在赋值」而被 Python 判定为局部变量 → 调用处 UnboundLocalError。
@@ -62,10 +64,13 @@ register_harness_profile(
 # 1. tools 只放最终交付相关的文件工具
 # 2. subagents 放网络、数据库、本地知识库三类信息获取助手，外加一个受约束的通用整理助手
 # 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文
+# 4. middleware 挂会话级次数护栏：本层管 `task`（派发子智能体）的额度
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
     tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+    # 会话级次数护栏：管 `task`（派发子智能体）的总量与单助手额度
+    middleware=[ToolBudgetMiddleware()],
     checkpointer=InMemorySaver(),
     subagents=[
         general_purpose_agent,
@@ -214,6 +219,8 @@ async def run_deep_agent(task_query, session_id):
         clear_cancel(session_id)
         # 一并清理工具故障熔断标记（与 clear_cancel 同一生命周期边界）
         clear_tool_failures(session_id)
+        # 清理工具调用次数计数：thread_id 跨天复用，不清理会误拦新任务
+        clear_budgets(session_id)
 
 
 if __name__ == "__main__":

@@ -6,18 +6,16 @@ DeepAgents 可识别的字典式子智能体。主智能体后续会根据 descr
 决定是否把企业内部结构化数据查询任务分派给它。
 """
 
+from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.prompts.agent_loader import sub_agents_content
 from app.tools.db_tools import execute_sql_query, get_table_data, list_sql_tables
 
 # 数据库助手必须按“列出表 -> 预览表数据 -> 执行 SQL”的顺序获取真实上下文
 # tools 列表中的三个工具共同约束了这个查询链路
-#
-# ⚠️ 这里**刻意不配** `response_format`：框架的两条结构化输出路径在本项目的模型端点上都不通
-# （ToolStrategy/AutoStrategy → 400 tool_choice；ProviderStrategy → 与"子智能体要调工具"不兼容）。
-# 返回契约改由**提示词约定**承载，见 app/agent/subagent_contract.py 顶部的实测记录。
 database_query_agent = {
     "name": sub_agents_content["db"]["name"],
     "description": sub_agents_content["db"]["description"],
     "system_prompt": sub_agents_content["db"]["system_prompt"],
     "tools": [list_sql_tables, get_table_data, execute_sql_query],
+    "middleware": [ToolBudgetMiddleware()],
 }
