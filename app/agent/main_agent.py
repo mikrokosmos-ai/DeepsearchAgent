@@ -7,6 +7,7 @@ session_id 创建独立工作目录，并把工具调用、子智能体调用和
 """
 
 import asyncio
+import os
 import shutil
 
 from deepagents import create_deep_agent
@@ -16,8 +17,10 @@ from deepagents.profiles import (
     register_harness_profile,
 )
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 
 from app.agent.llm import model
+from app.agent.middleware.subagent_report_middleware import SubAgentReportMiddleware
 from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.prompts.agent_loader import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
@@ -33,6 +36,10 @@ from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
 from app.core.tool_failfast import clear_tool_failures
+from app.core.subagent_reports import (
+    clear_reports as clear_subagent_reports,
+    summarize as summarize_subagent_reports,
+)
 from app.core.tool_budget import clear_budgets
 from app.core.paths import PROJECT_ROOT
 # 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
@@ -51,6 +58,21 @@ VIRTUAL_FS_TOOLS = frozenset(
     {"ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute"}
 )
 
+# 单次任务的图轮次上限。
+DEFAULT_RECURSION_LIMIT = 200
+
+
+def _recursion_limit() -> int:
+    """读取图轮次上限；缺失/非法/非正数一律回退默认（绝不抛）。"""
+    raw = os.getenv("AGENT_RECURSION_LIMIT")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_RECURSION_LIMIT
+    try:
+        value = int(str(raw).strip())
+        return value if value > 0 else DEFAULT_RECURSION_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_RECURSION_LIMIT
+
 # 一次性注册本项目的运行时策略（键用 provider，避免 .env 里模型改名后静默失配）：
 register_harness_profile(
     "openai",
@@ -64,13 +86,13 @@ register_harness_profile(
 # 1. tools 只放最终交付相关的文件工具
 # 2. subagents 放网络、数据库、本地知识库三类信息获取助手，外加一个受约束的通用整理助手
 # 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文
-# 4. middleware 挂会话级次数护栏：本层管 `task`（派发子智能体）的额度
+# 4. middleware 全是纯增量：会话级次数护栏 + 子智能体返回契约观察者
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
     tools=[generate_markdown, convert_md_to_pdf, read_file_content],
     # 会话级次数护栏：管 `task`（派发子智能体）的总量与单助手额度
-    middleware=[ToolBudgetMiddleware()],
+    middleware=[ToolBudgetMiddleware(), SubAgentReportMiddleware()],
     checkpointer=InMemorySaver(),
     subagents=[
         general_purpose_agent,
@@ -132,7 +154,12 @@ async def run_deep_agent(task_query, session_id):
     monitor.report_session_dir(session_dir_str)
 
     # checkpointer 依赖 thread_id 区分会话记忆；同一 session_id 会复用同一条执行上下文
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {"thread_id": session_id},
+        # 显式收敛图轮次上限：覆盖 deepagents 绑定的 9999（等于无上限），
+        # 防止模型在「派发 → 失败 → 再派发」里空转，烧掉时间与额度
+        "recursion_limit": _recursion_limit(),
+    }
 
     # 工作环境指令是运行时动态补充的，约束模型只在当前会话目录读写文件
     path_instruction = f"""
@@ -205,6 +232,18 @@ async def run_deep_agent(task_query, session_id):
     except asyncio.CancelledError:
         monitor.report_task_cancelled()
         raise
+    except GraphRecursionError:
+        # 达到图轮次上限：给用户可读提示
+        # （框架原文是一句英文 + 文档链接，对前端用户没有意义）
+        logger.warning(
+            f"主智能体达到图轮次上限：session_id={session_id}，"
+            f"recursion_limit={config.get('recursion_limit')}"
+        )
+        monitor.report_custom(
+            "error",
+            f"本次任务达到执行轮次上限（{config.get('recursion_limit')} 步）已停止。"
+            f"请把问题拆得更具体后重试；如需处理更长的任务，可调大环境变量 AGENT_RECURSION_LIMIT。",
+        )
     except Exception as e:
         # 异步执行异常也走 monitor，保证前端能收到明确错误事件；
         # 同时把完整堆栈写入服务端日志 —— 只上报异常摘要会让线上排查无从下手
@@ -221,6 +260,15 @@ async def run_deep_agent(task_query, session_id):
         clear_tool_failures(session_id)
         # 清理工具调用次数计数：thread_id 跨天复用，不清理会误拦新任务
         clear_budgets(session_id)
+        # 收尾前把子智能体返回契约汇总成一行日志（哪几路被截断 / 哪几路链路故障）
+        report_summary = summarize_subagent_reports(session_id)
+        if report_summary["count"]:
+            logger.info(
+                f"[MainAgent] 子智能体返回契约汇总：session_id={session_id}，"
+                f"共 {report_summary['count']} 条，截断={report_summary['truncated']}，"
+                f"故障={report_summary['failed']}，未解析={report_summary['unparsed']}"
+            )
+        clear_subagent_reports(session_id)
 
 
 if __name__ == "__main__":

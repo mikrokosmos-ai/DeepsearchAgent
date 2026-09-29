@@ -131,8 +131,16 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
             "image_urls": 1,
             "ts": 1,
         }
-        # 按时间戳降序取最近 limit 条，再反转为正序
-        cursor = mongo_tool.chat_message.find(query, projection).sort("ts", -1).limit(limit)
+        # 按 (ts, _id) 降序取最近 limit 条，再反转为正序。
+        # ⚠️ 必须带 `_id` 作第二排序键：`ts` 来自 datetime.now()，在 Windows 上粒度约 15.6ms，
+        # 同一 tick 写入的两条消息 `ts` 完全相同；只按 ts 排序时并列顺序不确定，
+        # 再叠加下面的 reverse() 就会把同一轮的「提问/回答」读反
+        # （与 P1-6 的 get_agent_messages 属同一类缺陷，那边已修）。
+        cursor = (
+            mongo_tool.chat_message.find(query, projection)
+            .sort([("ts", -1), ("_id", -1)])
+            .limit(limit)
+        )
         messages = list(cursor)
         messages.reverse()
         return messages

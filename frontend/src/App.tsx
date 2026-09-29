@@ -40,6 +40,7 @@ function createTurn(content: string): ChatTurn {
     events: [],
     files: [],
     isRunning: true,
+    notices: [],
     result: "",
     timestamp: new Date().toISOString()
   };
@@ -66,12 +67,13 @@ export default function App() {
         events: session.events,
         files: session.files,
         isRunning: session.isRunning,
+        notices: session.notices,
         result: session.result
       };
 
       return [...previous.slice(0, -1), nextLatestTurn];
     });
-  }, [session.events, session.files, session.isRunning, session.result]);
+  }, [session.events, session.files, session.isRunning, session.notices, session.result]);
 
   useEffect(() => {
     const streamNode = streamRef.current;

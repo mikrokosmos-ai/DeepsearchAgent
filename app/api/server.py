@@ -33,6 +33,7 @@ from app.api.monitor import manager
 from app.core.cancel import clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
 from app.core.tool_failfast import reset_tool_failures
+from app.core.subagent_reports import reset_reports as reset_subagent_reports
 from app.core.tool_budget import reset_budgets
 from app.core.runtime_paths import OUTPUT_DIR, UPDATED_SESSIONS_DIR
 # 主智能体问答历史的回读入口（与 RAG 多轮历史分离的独立集合）
@@ -107,6 +108,8 @@ async def run_task(request: TaskRequest):
     reset_tool_failures(thread_id)
     # 同理清空工具调用次数计数：不清理会让上一次任务的额度消耗误拦本次任务
     reset_budgets(thread_id)
+    # 同理清空子智能体契约报告：避免上一次任务的「某路失败/截断」残留到本次汇总
+    reset_subagent_reports(thread_id)
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
     task = asyncio.create_task(run_deep_agent(request.query, thread_id))

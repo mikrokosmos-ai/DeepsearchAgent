@@ -73,6 +73,20 @@ export interface SessionHistoryResponse {
   messages: SessionHistoryMessage[];
 }
 
+/** 子智能体返回契约的一次观察结果（§2：契约从"提示词约定"升级为"可观测事实"） */
+export interface SubAgentNotice {
+  /** 子智能体名，如「网络搜索助手」 */
+  subagent: string;
+  /** 是否解析到契约 JSON 块；false 表示已按正文内容降级理解 */
+  parsed: boolean;
+  /** 是否因次数/行数上限被截断（true 时结论可能不完整） */
+  truncated_by_limit: boolean;
+  /** 检索链路故障原文；无故障为 null */
+  error: string | null;
+  /** 来源标注条数 */
+  sources: number;
+}
+
 /* ========================= 知识库导入（/api/kb/*）========================= */
 
 /** 后端受理导入后返回的单条任务摘要 */

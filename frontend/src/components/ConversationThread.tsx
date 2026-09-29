@@ -10,6 +10,7 @@ import {
   FilePdfOutlined,
   FileSearchOutlined,
   FileTextOutlined,
+  InfoCircleOutlined,
   StopOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
@@ -17,7 +18,7 @@ import { Button, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import type { MonitorMessage, OutputFile } from "../types";
+import type { MonitorMessage, OutputFile, SubAgentNotice } from "../types";
 
 export interface ChatTurn {
   id: string;
@@ -25,6 +26,7 @@ export interface ChatTurn {
   events: MonitorMessage[];
   files: OutputFile[];
   isRunning: boolean;
+  notices: SubAgentNotice[];
   result: string;
   timestamp: string;
 }
@@ -290,13 +292,44 @@ function ThinkingLoader({ durationLabel }: { durationLabel: string }) {
   );
 }
 
+/** 提示语气：正常 / 被截断 / 链路故障 / 未解析（降级） */
+function noticeTone(notice: SubAgentNotice): string {
+  if (!notice.parsed) {
+    return "degraded";
+  }
+  if (notice.error) {
+    return "failed";
+  }
+  if (notice.truncated_by_limit) {
+    return "truncated";
+  }
+  return "normal";
+}
+
+function noticeText(notice: SubAgentNotice): string {
+  if (!notice.parsed) {
+    return "未给出返回契约代码块，已按正文内容降级理解";
+  }
+  if (notice.error) {
+    return `检索链路故障：${notice.error}`;
+  }
+  if (notice.truncated_by_limit) {
+    return `信息因上限被截断（来源 ${notice.sources} 条），结论可能不完整`;
+  }
+  return `返回正常（来源 ${notice.sources} 条）`;
+}
+
 function AssistantMessage({
   events,
   files,
   isRunning,
+  notices,
   result,
   timestamp,
-}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result" | "timestamp">) {
+}: Pick<
+  ChatTurn,
+  "events" | "files" | "isRunning" | "notices" | "result" | "timestamp"
+>) {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -353,6 +386,29 @@ function AssistantMessage({
             )}
           </div>
         )}
+
+        {notices.length > 0 ? (
+          <details className="thinking-block artifact-block" open>
+            <summary>
+              <span>
+                <InfoCircleOutlined aria-hidden />
+                信息完整性
+              </span>
+              <strong>{notices.length}</strong>
+            </summary>
+            <ul className="subagent-notice-list">
+              {notices.map((notice, index) => (
+                <li
+                  className={`subagent-notice subagent-notice--${noticeTone(notice)}`}
+                  key={`${notice.subagent}-${index}`}
+                >
+                  <strong>{notice.subagent}</strong>
+                  <span>{noticeText(notice)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
 
         <details
           className="thinking-block artifact-block"
@@ -429,6 +485,7 @@ export function ConversationThread({
             events={turn.events}
             files={turn.files}
             isRunning={turn.isRunning}
+            notices={turn.notices}
             result={turn.result}
             timestamp={turn.timestamp}
           />

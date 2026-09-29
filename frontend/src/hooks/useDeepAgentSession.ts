@@ -7,14 +7,34 @@ import type {
   MonitorMessage,
   OutputFile,
   SocketMessage,
+  SubAgentNotice,
   UploadedItem
 } from "../types";
 
 const MAX_EVENTS = 120;
+const MAX_NOTICES = 12;
 
 function extractString(data: Record<string, unknown>, key: string): string | null {
   const value = data[key];
   return typeof value === "string" ? value : null;
+}
+
+/** ：把 subagent_report 事件的 data 归一成强类型提示（缺字段则忽略该条） */
+function toSubAgentNotice(data: Record<string, unknown>): SubAgentNotice | null {
+  const subagent = extractString(data, "subagent");
+  if (!subagent) {
+    return null;
+  }
+
+  const sources = data.sources;
+
+  return {
+    subagent,
+    parsed: data.parsed === true,
+    truncated_by_limit: data.truncated_by_limit === true,
+    error: extractString(data, "error"),
+    sources: typeof sources === "number" ? sources : 0
+  };
 }
 
 export function useDeepAgentSession() {
@@ -28,6 +48,7 @@ export function useDeepAgentSession() {
   const [files, setFiles] = useState<OutputFile[]>([]);
   const [sessionPath, setSessionPath] = useState("");
   const [result, setResult] = useState("");
+  const [notices, setNotices] = useState<SubAgentNotice[]>([]);
   const [lastError, setLastError] = useState("");
   const [lastPongAt, setLastPongAt] = useState("");
   const [isRunning, setIsRunning] = useState(false);
@@ -54,6 +75,7 @@ export function useDeepAgentSession() {
     setFiles([]);
     setSessionPath("");
     setResult("");
+    setNotices([]);
     setLastError("");
     setUploadedItems([]);
     uploadedNameSetRef.current.clear();
@@ -141,6 +163,13 @@ export function useDeepAgentSession() {
             }
           }
 
+          if (payload.event === "subagent_report") {
+            const notice = toSubAgentNotice(payload.data);
+            if (notice) {
+              setNotices((previous) => [...previous, notice].slice(-MAX_NOTICES));
+            }
+          }
+
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
             setResult(finalResult || payload.message);
@@ -222,6 +251,7 @@ export function useDeepAgentSession() {
       setIsCancelling(false);
       setEvents([]);
       setResult("");
+      setNotices([]);
       setLastError("");
       try {
         const response = await startTask(cleanQuery, threadId);
@@ -324,6 +354,7 @@ export function useDeepAgentSession() {
     isUploading,
     lastError,
     lastPongAt,
+    notices,
     refreshFiles,
     resetSession,
     result,

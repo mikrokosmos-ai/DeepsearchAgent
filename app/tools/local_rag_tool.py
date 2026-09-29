@@ -30,8 +30,8 @@ from app.core.tool_failfast import get_tool_failure, mark_tool_failed
 from app.rag.pipelines.query_pipeline.graph import query_app
 from app.rag.pipelines.query_pipeline.state import create_query_default_state
 
-# 取不到 DeepAgents 会话上下文时的兜底会话名：保证工具仍可用（只是历史聚合到同一会话）
-_DEFAULT_SESSION = "local_kb_default"
+# 取不到 DeepAgents 会话上下文时的兜底会话
+_DEFAULT_SESSION_PREFIX = "local_kb_nocx"
 
 # 故障熔断标记用的工具名（与 @tool 注册名保持一致）
 _TOOL_NAME = "local_rag_search"
@@ -50,7 +50,10 @@ def local_rag_search(question: str) -> str:
     # 会话维度的三元 key：
     #   session_id —— DeepAgents 的 thread_id，用于让同一会话的多轮检索共享 Mongo 历史；
     #   task_id    —— 每次工具调用唯一，作为 SSE 队列 key，避免并发调用互相串台。
-    session_id = get_thread_context() or _DEFAULT_SESSION
+    context_session = get_thread_context()
+    # 有上下文（主链路）：用会话 id —— 同一会话多轮共享历史，故障短路按会话生效。
+    # 无上下文（离线脚本 / 单测等）：退化为本次调用唯一 id，避免跨会话污染。
+    session_id = context_session or f"{_DEFAULT_SESSION_PREFIX}#{uuid4().hex[:8]}"
     task_id = f"{session_id}#{uuid4().hex[:8]}"
 
     # 失败短路：本任务内该工具已确认故障 → 直接返回，不再执行检索链路。
