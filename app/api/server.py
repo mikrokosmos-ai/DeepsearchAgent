@@ -7,12 +7,14 @@ WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执�
 """
 
 import asyncio
+import os
 import shutil
 import uuid
 from pathlib import Path
 from typing import List
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
     File,
@@ -57,13 +59,45 @@ output_dir.mkdir(parents=True, exist_ok=True)
 updated_dir = UPDATED_SESSIONS_DIR
 updated_dir.mkdir(parents=True, exist_ok=True)
 
-# 教学项目通常前后端分别本地启动，这里放开跨域以便 Vite 页面直接调用 API
+# --- 跨域白名单-----------------------------------------------------
+load_dotenv()  # 幂等；确保本模块被单独导入时也能读到 .env 里的 CORS_ALLOW_ORIGINS
+_DEFAULT_CORS_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+
+def _cors_settings() -> tuple[list[str], str | None]:
+    """
+    解析跨域白名单
+
+    CORS_ALLOW_ORIGINS 支持三种写法：
+      - 未设置 / 留空：用默认正则放行 localhost 与 127.0.0.1 的任意端口；
+      - "*"：显式退回通配（仅当确实需要跨机访问时使用）；
+      - 具体来源，逗号分隔，例如 http://192.168.1.10:5173,http://localhost:5173
+    :return: (显式来源列表, 来源正则 或 None)
+    """
+    raw = (os.getenv("CORS_ALLOW_ORIGINS") or "").strip()
+    if not raw:
+        return [], _DEFAULT_CORS_ORIGIN_REGEX
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    if items == ["*"]:
+        logger.warning(
+            "[CORS] CORS_ALLOW_ORIGINS=* 已退回通配来源，仅应在可信的本机网络中这样配置"
+        )
+        return ["*"], None
+    return items, None
+
+
+_cors_origins, _cors_origin_regex = _cors_settings()
+_cors_desc = "通配 *" if _cors_origins == ["*"] else (_cors_origins or _cors_origin_regex)
+logger.info(f"[CORS] 允许来源 = {_cors_desc}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 前端不使用 Cookie/凭证（见 frontend/src/lib/api.ts 的 requestJson），
+    # 故保持默认的 allow_credentials=False —— 它也是“通配来源”能成立的前提。
 )
 
 
@@ -275,7 +309,7 @@ async def list_files(path: str):
 @app.get("/api/history/{thread_id}")
 async def get_session_history(thread_id: str):
     """
-    读取指定会话的主智能体问答历史 。
+    读取指定会话的主智能体问答历史
 
     用途：最终答案此前**只经 WebSocket 推送**，页面刷新或断线重连后就永久看不到了。
     现在 run_deep_agent 会把用户提问与最终答案落库（`agent_message` 集合），

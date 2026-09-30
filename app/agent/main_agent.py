@@ -9,6 +9,7 @@ session_id 创建独立工作目录，并把工具调用、子智能体调用和
 import asyncio
 import os
 import shutil
+import time
 
 from deepagents import create_deep_agent
 from deepagents.profiles import (
@@ -35,18 +36,20 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
-from app.core.tool_failfast import clear_tool_failures
+from app.core.tool_failfast import clear_tool_failures, get_failed_tools
 from app.core.subagent_reports import (
     clear_reports as clear_subagent_reports,
     summarize as summarize_subagent_reports,
 )
-from app.core.tool_budget import clear_budgets
+from app.core.tool_budget import clear_budgets, get_usage as get_budget_usage
 from app.core.paths import PROJECT_ROOT
 # 用别名导入：函数体内的局部变量名恰好是 session_dir，若直接导入同名函数会因为
 # 「函数作用域内存在赋值」而被 Python 判定为局部变量 → 调用处 UnboundLocalError。
 from app.core.runtime_paths import UPDATED_SESSIONS_DIR, session_dir as resolve_session_dir
 # 主智能体的问答历史（独立集合 agent_message，与 RAG 多轮历史分离）
 from app.rag.repositories.history_repo import save_agent_message
+# 每次任务的运行元数据（独立集合 agent_run），供可观测性与评测（§5）
+from app.rag.repositories.run_repo import save_agent_run
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -117,6 +120,11 @@ async def run_deep_agent(task_query, session_id):
     """
     logger.info(f"[MainAgent] 开始执行会话，session_id={session_id}")
 
+    # 运行元数据：进入函数即开始计时，收尾时连同结局一起写入 agent_run 集合
+    started_at = time.perf_counter()
+    # 结局标记由各分支显式设置；默认 unknown 便于暴露"漏设"（收尾时读它落库）
+    outcome = "unknown"
+
     # 每个会话独立使用 output/sessions/session_{session_id}，避免不同用户的产物互相覆盖。
     # resolve_session_dir() 内含旧路径只读兼容（旧的 output/session_* 仍可继续用），见 runtime_paths.py
     session_dir = resolve_session_dir(session_id)
@@ -177,6 +185,7 @@ async def run_deep_agent(task_query, session_id):
     try:
         # 连 astream 都不启动，避免为一个已取消的任务白跑一次模型调用。
         if is_cancelled(session_id):
+            outcome = "skipped_cancelled"
             logger.info(f"[MainAgent] 任务在启动前已被取消，跳过执行：session_id={session_id}")
             monitor.report_task_cancelled()
             return
@@ -191,6 +200,7 @@ async def run_deep_agent(task_query, session_id):
         ):
             # 协作式取消检查点：astream 的每一轮都是一次可中断边界。
             if is_cancelled(session_id):
+                outcome = "cancelled"
                 logger.info(f"[MainAgent] 检测到取消请求，停止流式执行：session_id={session_id}")
                 monitor.report_task_cancelled()
                 return
@@ -225,16 +235,22 @@ async def run_deep_agent(task_query, session_id):
                             save_agent_message(session_id, "assistant", last_msg.content)
                             monitor.report_task_result(last_msg.content)
 
+        # 流式执行自然结束 = 本次任务成功走完（无异常、未被取消）
+        outcome = "success"
+
     except TaskCancelledError as e:
         # 节点边界检出的协作式取消：与 asyncio.CancelledError 同样上报取消事件，
+        outcome = "cancelled"
         logger.info(f"[MainAgent] 任务已按用户请求取消：session_id={session_id}，{e}")
         monitor.report_task_cancelled()
     except asyncio.CancelledError:
+        outcome = "cancelled"
         monitor.report_task_cancelled()
         raise
     except GraphRecursionError:
         # 达到图轮次上限：给用户可读提示
         # （框架原文是一句英文 + 文档链接，对前端用户没有意义）
+        outcome = "recursion_limit"
         logger.warning(
             f"主智能体达到图轮次上限：session_id={session_id}，"
             f"recursion_limit={config.get('recursion_limit')}"
@@ -249,6 +265,7 @@ async def run_deep_agent(task_query, session_id):
         # 同时把完整堆栈写入服务端日志 —— 只上报异常摘要会让线上排查无从下手
         # （实测：凭据含非 ASCII 字符时 httpx 在 header 编码阶段抛错，
         #  前端仅显示 "'ascii' codec can't encode ..."，无法定位到具体 header）。
+        outcome = "error"
         logger.exception(f"主智能体执行异常：{e}")
         monitor.report_custom("error", f"执行主智能发生异常信息：{str(e)}")
     finally:
@@ -256,18 +273,37 @@ async def run_deep_agent(task_query, session_id):
         reset_session_context(session_dir_token, session_id_token)
         # 清理协作式取消标志，避免内存态随会话数累积
         clear_cancel(session_id)
-        # 一并清理工具故障熔断标记（与 clear_cancel 同一生命周期边界）
-        clear_tool_failures(session_id)
-        # 清理工具调用次数计数：thread_id 跨天复用，不清理会误拦新任务
-        clear_budgets(session_id)
-        # 收尾前把子智能体返回契约汇总成一行日志（哪几路被截断 / 哪几路链路故障）
+        # ---- §5 运行元数据：**必须在任何 clear_* 之前取数** ----
+        # clear_budgets / clear_tool_failures / clear_subagent_reports 会把本次任务的
+        # 计数与标记清空，先清再取就只能拿到空值 —— 这条顺序是本模块最容易踩的坑。
         report_summary = summarize_subagent_reports(session_id)
+        tool_usage = get_budget_usage(session_id)
+        failed_tools = get_failed_tools(session_id)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        # 落库函数绝不抛；写失败只记 warning，不影响任务本身的成败判定
+        save_agent_run(
+            session_id=session_id,
+            outcome=outcome,
+            elapsed_ms=elapsed_ms,
+            recursion_limit=config.get("recursion_limit"),
+            tool_usage=tool_usage,
+            failed_tools=failed_tools,
+            report_summary=report_summary,
+        )
+        # 收尾日志（含运行元数据与子智能体契约汇总）
+        logger.info(
+            f"[MainAgent] 运行元数据：session_id={session_id}，结局={outcome}，"
+            f"耗时={elapsed_ms}ms，工具用量={tool_usage}，故障工具={list(failed_tools)}"
+        )
         if report_summary["count"]:
             logger.info(
                 f"[MainAgent] 子智能体返回契约汇总：session_id={session_id}，"
                 f"共 {report_summary['count']} 条，截断={report_summary['truncated']}，"
                 f"故障={report_summary['failed']}，未解析={report_summary['unparsed']}"
             )
+        # 清理内存态（统一放在采集之后）
+        clear_tool_failures(session_id)
+        clear_budgets(session_id)
         clear_subagent_reports(session_id)
 
 

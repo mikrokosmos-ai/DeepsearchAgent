@@ -53,7 +53,14 @@ def local_rag_search(question: str) -> str:
     context_session = get_thread_context()
     # 有上下文（主链路）：用会话 id —— 同一会话多轮共享历史，故障短路按会话生效。
     # 无上下文（离线脚本 / 单测等）：退化为本次调用唯一 id，避免跨会话污染。
-    session_id = context_session or f"{_DEFAULT_SESSION_PREFIX}#{uuid4().hex[:8]}"
+    if context_session:
+        session_id = context_session
+    else:
+        session_id = f"{_DEFAULT_SESSION_PREFIX}#{uuid4().hex[:8]}"
+        logger.warning(
+            f"本地知识库检索未取到会话上下文，已退化为一次性会话键：session_id={session_id}"
+            "（本次调用不共享多轮历史；故障短路仅对本次生效）"
+        )
     task_id = f"{session_id}#{uuid4().hex[:8]}"
 
     # 失败短路：本任务内该工具已确认故障 → 直接返回，不再执行检索链路。
@@ -90,6 +97,19 @@ def local_rag_search(question: str) -> str:
             result_state = query_app.invoke(state)
 
         answer = (result_state.get("answer") or "").strip()
+
+        if answer and not (result_state.get("item_names") or []):
+            logger.warning(
+                f"本地知识库需要用户确认型号（确权未完成）：task_id={task_id}，知识库返回={answer[:80]}"
+            )
+            return (
+                "【需要用户确认型号】知识库无法确定你问的是哪一个产品。"
+                "这**不是检索失败**，而是问题里的型号不够准确 —— 知识库的返回是："
+                f"{answer}\n"
+                "请把这一情况如实上报给主智能体，由主智能体在最终答复里请用户补充准确的型号。"
+                "**不要用相同措辞重复检索**：重试不会得到不同结果。"
+            )
+
         if not answer:
             logger.warning(f"本地知识库检索未产出答案：task_id={task_id}")
             return "本地知识库未返回任何内容，可能知识库中没有与该问题相关的资料。"

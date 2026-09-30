@@ -18,6 +18,9 @@ CHAT_MESSAGE_COLLECTION = "chat_message"
 # 主智能体会话集合名：只存「主智能体」这一层的人机问答。
 AGENT_MESSAGE_COLLECTION = "agent_message"
 
+# 任务运行元数据集合名：每次任务收尾写一条（耗时/结局/工具用量/故障与截断路数）。
+AGENT_RUN_COLLECTION = "agent_run"
+
 
 class HistoryMongoTool:
     """
@@ -40,10 +43,13 @@ class HistoryMongoTool:
         self.chat_message = self.db[CHAT_MESSAGE_COLLECTION]
         # 主智能体的问答历史（与 RAG 多轮历史分离，见上方常量注释）
         self.agent_message = self.db[AGENT_MESSAGE_COLLECTION]
+        # 每次任务的运行元数据（可观测性与评测）
+        self.agent_run = self.db[AGENT_RUN_COLLECTION]
 
         # 复合索引：session_id 升序 + ts 降序，匹配「按会话取最新消息」这一核心查询
         self.chat_message.create_index([("session_id", 1), ("ts", -1)])
         self.agent_message.create_index([("session_id", 1), ("ts", -1)])
+        self.agent_run.create_index([("session_id", 1), ("ts", -1)])
 
         logger.info(f"MongoDB 连接成功：{self.db_name}")
 

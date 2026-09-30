@@ -48,6 +48,7 @@ dependencies = [
     "mineru-open-sdk>=0.2.0",
     # D6：百炼 MCP 联网检索
     "openai-agents>=0.4.2",
+    "mcp<2",
 ]
 
 [tool.uv]

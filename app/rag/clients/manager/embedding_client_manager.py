@@ -4,6 +4,7 @@ Embedding 客户端管理器
 统一创建和管理本地 BGE-M3 混合向量模型，服务于稠密 + 稀疏向量的生成。
 """
 
+import threading
 from typing import Optional
 
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
@@ -19,44 +20,57 @@ class EmbeddingClientManager:
         self.embedding_config = embedding_config
         # 声明为 None，真正的模型加载放到 init() 里（显存开销大，需延迟到用时）
         self.client: Optional[BGEM3EmbeddingFunction] = None
+        # 加载互斥锁（用途见 init()）
+        self._init_lock = threading.Lock()
+        # 推理串行锁（用途见 encode()）
+        self._infer_lock = threading.Lock()
 
     def init(self):
-        # 幂等：已加载则直接返回，避免重复加载模型
+        # 快路径：已加载则直接返回（不加锁，避免热路径上的无谓开销）
         if self.client is not None:
             return
 
-        # 优先用本地快照路径，缺失时回退到仓库标识（由下层自行决定是否联网下载）
-        model_name = self.embedding_config.bge_m3_path or self.embedding_config.bge_m3
-        device = self.embedding_config.bge_device or "cpu"
-        use_fp16 = self.embedding_config.bge_fp16 or False
+        with self._init_lock:
+            # 双重检查：等锁期间可能已有其它线程加载完成
+            if self.client is not None:
+                return
 
-        if not model_name:
-            raise ClientInitError(
-                "Embedding 配置缺失：请在 .env 中配置 BGE_M3_PATH 或 BGE_M3"
+            # 优先用本地快照路径，缺失时回退到仓库标识（由下层自行决定是否联网下载）
+            model_name = self.embedding_config.bge_m3_path or self.embedding_config.bge_m3
+            device = self.embedding_config.bge_device or "cpu"
+            use_fp16 = self.embedding_config.bge_fp16 or False
+
+            if not model_name:
+                raise ClientInitError(
+                    "Embedding 配置缺失：请在 .env 中配置 BGE_M3_PATH 或 BGE_M3"
+                )
+
+            logger.info(
+                f"开始初始化 BGE-M3：model={model_name} device={device} fp16={use_fp16}"
             )
 
-        logger.info(
-            f"开始初始化 BGE-M3：model={model_name} device={device} fp16={use_fp16}"
-        )
-
-        try:
-            # normalize_embeddings=True：模型侧做 L2 归一化，配合 Milvus 的 IP（内积）度量
-            # 即可等价于余弦相似度，省去检索期再做一次归一化
-            self.client = BGEM3EmbeddingFunction(
-                model_name=model_name,
-                device=device,
-                use_fp16=use_fp16,
-                normalize_embeddings=True,
-            )
-            logger.info("BGE-M3 初始化成功（已开启 L2 归一化，适配 IP 内积检索）")
-        except Exception as e:
-            raise ClientInitError(
-                f"BGE-M3 模型加载失败：{model_name}（device={device}）", cause=e
-            ) from e
+            try:
+                # normalize_embeddings=True：模型侧做 L2 归一化，配合 Milvus 的 IP（内积）度量
+                # 即可等价于余弦相似度，省去检索期再做一次归一化
+                self.client = BGEM3EmbeddingFunction(
+                    model_name=model_name,
+                    device=device,
+                    use_fp16=use_fp16,
+                    normalize_embeddings=True,
+                )
+                logger.info("BGE-M3 初始化成功（已开启 L2 归一化，适配 IP 内积检索）")
+            except Exception as e:
+                # 失败时必须保持 client 为 None，否则后续调用会拿到半初始化的对象
+                self.client = None
+                raise ClientInitError(
+                    f"BGE-M3 模型加载失败：{model_name}（device={device}）", cause=e
+                ) from e
 
     def close(self):
         # 释放模型引用（显存回收交由 GC 与 torch 管理）
-        self.client = None
+        # 与 init() 共用同一把锁：避免"正在加载"时被 close 打断而产生悬空引用
+        with self._init_lock:
+            self.client = None
 
     def encode(self, texts):
         """
@@ -70,31 +84,34 @@ class EmbeddingClientManager:
             raise EmbeddingError("参数 texts 必须是非空列表", node_name="embedding.encode")
 
         # 懒加载兜底：未经 lifespan 预热时，首次调用自动加载模型
+        # （init() 内部已有并发保护，这里多个线程同时进入是安全的）
         if self.client is None:
             self.init()
 
         logger.info(f"开始为 {len(texts)} 条文本生成混合向量")
 
-        try:
-            embeddings = self.client.encode_documents(texts)
-        except Exception as e:
-            raise EmbeddingError(
-                f"BGE-M3 向量化失败（{len(texts)} 条文本）", node_name="embedding.encode", cause=e
-            ) from e
+        with self._infer_lock:
+            try:
+                embeddings = self.client.encode_documents(texts)
+            except Exception as e:
+                raise EmbeddingError(
+                    f"BGE-M3 向量化失败（{len(texts)} 条文本）",
+                    node_name="embedding.encode", cause=e
+                ) from e
 
-        # 模型返回的 sparse 是整批共享的 CSR 矩阵，需按 indptr 切段拆成"每条文本一个 dict"
-        sparse_matrix = embeddings["sparse"]
-        processed_sparse = []
-        for i in range(len(texts)):
-            start, end = sparse_matrix.indptr[i], sparse_matrix.indptr[i + 1]
-            indices = sparse_matrix.indices[start:end].tolist()
-            data = sparse_matrix.data[start:end].tolist()
-            processed_sparse.append({k: v for k, v in zip(indices, data)})
+            # 模型返回的 sparse 是整批共享的 CSR 矩阵，需按 indptr 切段拆成"每条文本一个 dict"
+            sparse_matrix = embeddings["sparse"]
+            processed_sparse = []
+            for i in range(len(texts)):
+                start, end = sparse_matrix.indptr[i], sparse_matrix.indptr[i + 1]
+                indices = sparse_matrix.indices[start:end].tolist()
+                data = sparse_matrix.data[start:end].tolist()
+                processed_sparse.append({k: v for k, v in zip(indices, data)})
 
-        result = {
-            "dense": [emb.tolist() for emb in embeddings["dense"]],
-            "sparse": processed_sparse,
-        }
+            result = {
+                "dense": [emb.tolist() for emb in embeddings["dense"]],
+                "sparse": processed_sparse,
+            }
 
         # 条数一致性校验：dense/sparse 任一与入参数量不符都说明模型输出异常，
         # 此时若继续写库会造成向量与文本错位，故在边界处直接失败

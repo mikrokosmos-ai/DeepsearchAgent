@@ -25,6 +25,12 @@ _REMEDY = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# 请求级超时与重试
+# ---------------------------------------------------------------------------
+DEFAULT_LLM_TIMEOUT_S = 300.0
+DEFAULT_LLM_MAX_RETRIES = 2
+
 
 def missing_env_keys() -> list[str]:
     """
@@ -48,12 +54,54 @@ def build_missing_env_error(keys: list[str]) -> RuntimeError:
     return RuntimeError("\n".join(lines))
 
 
+def _float_env(name: str, default: float) -> float:
+    """读取浮点环境变量；非法值或非正值回退默认值（避免错误配置击穿导入期）。"""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _non_negative_int_env(name: str, default: int) -> int:
+    """
+    读取非负整型环境变量；非法值回退默认值。
+
+    与 db_tools 的 `_int_env` 不同，这里**允许 0** —— `LLM_MAX_RETRIES=0`
+    是有意义的配置（表示不重试，失败即返回）。
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def llm_timeout_s() -> float:
+    """单次模型请求的超时秒数（可通过 LLM_TIMEOUT_S 覆盖）。"""
+    return _float_env("LLM_TIMEOUT_S", DEFAULT_LLM_TIMEOUT_S)
+
+
+def llm_max_retries() -> int:
+    """模型请求的失败重试次数（可通过 LLM_MAX_RETRIES 覆盖）。"""
+    return _non_negative_int_env("LLM_MAX_RETRIES", DEFAULT_LLM_MAX_RETRIES)
+
+
 _missing_keys = missing_env_keys()
 if _missing_keys:
     raise build_missing_env_error(_missing_keys)
 
 # 使用 OpenAI 兼容协议接入模型；具体模型名由 .env 中的 LLM_QWEN_MAX 控制
+# `timeout` 会被映射到 ChatOpenAI 的 RequestTimeout（即 request_timeout），实测生效
 model = init_chat_model(
     model=os.getenv("LLM_QWEN_MAX"),
     model_provider="openai",
+    timeout=llm_timeout_s(),
+    max_retries=llm_max_retries(),
 )

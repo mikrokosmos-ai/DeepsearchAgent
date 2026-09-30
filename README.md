@@ -319,7 +319,7 @@ docker compose ps
 
 | 服务              | 容器名                  | 宿主端口             | 用途                                       |
 | --------------- | -------------------- | ---------------- | ---------------------------------------- |
-| MySQL           | `deepsearch-mysql`   | `3307` / `3306`  | 业务关系库（dw），初始化脚本 `docker/mysql/mysql.sql`      |
+| MySQL           | `deepsearch-mysql`   | `3306`           | 业务关系库（dw），初始化脚本 `docker/mysql/mysql.sql`      |
 | MinIO           | `deepsearch-minio`   | `9000` / `9001`  | 业务对象存储（图片资产），控制台 `http://127.0.0.1:9001` |
 | etcd            | `deepsearch-etcd`    | —                | Milvus 元数据存储                             |
 | Milvus 内部 MinIO | `deepsearch-milvus-minio` | `9002` / `9003`  | Milvus 内部对象存储                            |
@@ -350,12 +350,14 @@ cp .env.example .env        # 直接由样例文件生成，再按实际环境�
 |           | `LLM_QWEN_MAX`                              | `qwen-max`                                          | 主智能体文本模型（app/agent/llm.py 使用）             |
 |           | `LLM_DEFAULT_MODEL`                         | `qwen3.7-flash`                                     | RAG 链路配置类使用的文本模型                         |
 |           | `LLM_DEFAULT_TEMPERATURE`                   | `0.1`                                               | 生成温度                                     |
+|           | `LLM_TIMEOUT_S`                             | `300`                                               | 模型请求级超时秒数（防流式请求无限挂起）              |
+|           | `LLM_MAX_RETRIES`                           | `2`                                                 | 模型请求失败重试次数（0 = 不重试）                  |
 |           | `VL_MODEL`                                  | `qwen-vl-max`                                       | 多模态模型（图片理解）                              |
 | 联网        | `TAVILY_API_KEY`                            | `tvly-...`                                          | Tavily 联网搜索密钥                             |
 |           | `MCP_DASHSCOPE_BASE_URL`                    | `https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp` | 百炼 WebSearch MCP 地址                  |
 | 文档解析      | `MINERU_API_TOKEN`                          | `sk-...`                                            | MinerU 平台 API Token                        |
 |           | `MINERU_BASE_URL`                           | `https://mineru.net/api/v4`                         | MinerU 服务地址                              |
-| MySQL     | `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` / `MYSQL_HOST` / `MYSQL_PORT` | `root` / `root` / `deepsearch_db` / `localhost` / `3307` | 业务数仓连接（端口默认 3307，避开本机 3306）    |
+| MySQL     | `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` / `MYSQL_HOST` / `MYSQL_PORT` | `root` / `root` / `deepsearch_db` / `localhost` / `3306` | 业务数仓连接（与 compose 默认端口一致）              |
 | Milvus    | `MILVUS_URL`                                | `http://127.0.0.1:19530`                            | **必须带协议前缀**（pymilvus 3.x 要求）                 |
 |           | `CHUNKS_COLLECTION` / `ITEM_NAME_COLLECTION` / `ENTITY_NAME_COLLECTION` | `kd_db_chunks` / `kd_db_item_names` / `kd_db_entity_names` | 三个集合名                        |
 | MongoDB   | `MONGO_URL` / `MONGO_DB_NAME`               | `mongodb://127.0.0.1:27017` / `deepsearch_rag`      | 连接串 / 库名                                |
