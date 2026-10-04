@@ -26,6 +26,8 @@ from app.api.context import get_thread_context
 from app.api.monitor import monitor
 from app.api.rag_event_bridge import RagEventBridge
 from app.core.logger import logger
+# 检索漏斗指标：子图 state 里的 retrieval_funnel 经此带出，供收尾写入 agent_run
+from app.core.retrieval_funnel_store import record_funnel
 from app.core.tool_failfast import get_tool_failure, mark_tool_failed
 from app.rag.pipelines.query_pipeline.graph import query_app
 from app.rag.pipelines.query_pipeline.state import create_query_default_state
@@ -96,7 +98,28 @@ def local_rag_search(question: str) -> str:
         with RagEventBridge(task_id):
             result_state = query_app.invoke(state)
 
+        # 采集检索漏斗：必须用 session_id 作 key —— task_id 每次调用都变，
+        # 用它会让收尾读不到任何指标（与故障短路的键选择同理）。
+        # 无论后续走向哪条分支（确权未完成 / 无答案 / 正常），漏斗都已产生，故在此处先记录。
+        funnel = result_state.get("retrieval_funnel") or {}
+        if record_funnel(session_id, funnel):
+            logger.info(f"已采集检索漏斗指标：session_id={session_id}，{funnel}")
+
         answer = (result_state.get("answer") or "").strip()
+
+        # 证据闸门拦截：整批证据被判为无关并归零 → 明确告知"没有相关资料"，
+        # 注意判据顺序：闸门拦截时 reranked_docs 为空，但 answer 可能非空
+        # （模型在 prompt 里看到"无本地证据"的提示后仍会生成话术），故必须优先判闸门。
+        gate_blocked = bool(result_state.get("_evidence_gate_blocked"))
+        if gate_blocked:
+            logger.warning(
+                f"本地知识库证据闸门拦截（本批判定为无关）：task_id={task_id}"
+            )
+            return (
+                "知识库没有相关资料。"
+                "（本次检索命中的内容与问题相关性过低，已被证据闸门整体过滤，"
+                "不是检索故障。请如实向主智能体上报「知识库中无相关资料」，不要据此推测或编造。）"
+            )
 
         if answer and not (result_state.get("item_names") or []):
             logger.warning(

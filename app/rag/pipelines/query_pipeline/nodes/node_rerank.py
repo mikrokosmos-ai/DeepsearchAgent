@@ -23,6 +23,9 @@ RERANK_MIN_LOCAL_KEEP: int = query_pipeline_config.rerank_min_local_keep
 RERANK_GAP_RATIO: float = query_pipeline_config.rerank_gap_ratio
 # 断崖阈值（绝对）
 RERANK_GAP_ABS: float = query_pipeline_config.rerank_gap_abs
+# 证据闸门：整批最高精排分的绝对下限。0 = 关闭（恒放行）。
+# 判据是整批最高分而非逐条 —— 逐条过滤的误丢代价远高于误放。
+EVIDENCE_MIN_SCORE: float = query_pipeline_config.evidence_min_score
 # -----------------------------
 # Cross-Encoder 打分的资源约束
 RERANK_BATCH_SIZE: int = int(os.getenv("RERANK_BATCH_SIZE", "8"))
@@ -138,7 +141,9 @@ def step_3_rerank_score_and_sort(state, final_chunk_list):
     except RerankError as e:
         # 降级：重排不可用不应让整条查询链路失败。
         # 保留 RRF 给出的顺序，仅补零分占位，后续 step_4 的断崖截断仍可正常工作。
+        # 降级标记写进 state：step_3.5 闸门据此"一律放行"（分数不可信时不做丢弃决策）。
         logger.warning(f"重排失败，降级为 RRF 原序返回：{e}")
+        state["_rerank_degraded"] = True
         for chunk in final_chunk_list:
             chunk.setdefault("score", 0.0)
         return final_chunk_list
@@ -152,6 +157,36 @@ def step_3_rerank_score_and_sort(state, final_chunk_list):
     logger.info(f"已完成编排和打分！最终结果为：{final_chunk_list}")
     # 7.返回数据
     return final_chunk_list
+
+
+@step_log("step_3_5_evidence_gate")
+def step_3_5_evidence_gate(chunk_list_score_sorted, degraded: bool = False):
+    """
+    证据闸门：判断本批证据是否"根本不相关"。
+    :param chunk_list_score_sorted: step_3 输出的降序列表
+    :param degraded: step_3 是否走了"重排失败补零分"的降级分支
+    :return: (是否放行, 整批最高分)
+    """
+    if EVIDENCE_MIN_SCORE <= 0:
+        # 闸门关闭：不计算、不判定，直接放行（保持零行为变化）
+        return True, 0.0
+    if degraded:
+        logger.warning(
+            f"证据闸门：重排处于降级状态，分数不可信，按约定放行（阈值={EVIDENCE_MIN_SCORE}）"
+        )
+        return True, 0.0
+    if not chunk_list_score_sorted:
+        # 空候选：无证据可判，放行让下游走"无资料"分支
+        return True, 0.0
+    top_score = chunk_list_score_sorted[0].get("score", 0.0)
+    if top_score < EVIDENCE_MIN_SCORE:
+        logger.warning(
+            f"证据闸门拦截：整批最高精排分 {top_score} < 阈值 {EVIDENCE_MIN_SCORE}，"
+            f"本批 {len(chunk_list_score_sorted)} 条证据判定为无关，整批丢弃"
+        )
+        return False, top_score
+    logger.info(f"证据闸门通过：整批最高精排分 {top_score} >= 阈值 {EVIDENCE_MIN_SCORE}")
+    return True, top_score
 
 
 @step_log("step_4_chunk_topk")
@@ -251,16 +286,71 @@ def node_rerank(state):
     # 3. 将两路数据捏到一起 [{},{}] -> 两个循环 rrf_chunks | web_search_docs
     # 约定返回结果: [{title: ,  text: content or snippet ,  url : mcp专属 ,  type: milvus or kg or web ,  score : 0.0}]
     final_chunk_list = step_2_merged_rrf_and_mcp(rrf_chunks, web_search_docs)
+    # 3.1 漏斗：合池后条数（RRF 存活 + 联网）
+    pool_count = len(final_chunk_list)
     # 4. 使用reranker进行问题和答案打分(批量处理)，并做好排序
     chunk_list_score_sorted = step_3_rerank_score_and_sort(state, final_chunk_list)
+    # 4.1 证据闸门：打分后、截断前判定本批是否根本无关。
+    #     不通过 → 整批归零并直接返回：绝不能继续跑到 step_5 分区保底，
+    #     否则保底会把刚丢掉的本地切片重新捡回来（"闸门丢、保底捡"的循环）。
+    gate_passed, gate_top_score = step_3_5_evidence_gate(
+        chunk_list_score_sorted, degraded=bool(state.get("_rerank_degraded"))
+    )
+    if not gate_passed:
+        state["reranked_docs"] = []
+        # 显式标记：供 local_rag_tool 区分"闸门拦截"与"检索没命中"两种空结果
+        state["_evidence_gate_blocked"] = True
+        state["retrieval_funnel"] = _append_rerank_funnel(
+            state, pool_count, len(chunk_list_score_sorted), 0, 0,
+        )
+        add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
+        return state
     # 5. 进行动态数据截取
     chunk__score_sorted_topk = step_4_chunk_topk(chunk_list_score_sorted)
     # 6. 分区保底：断崖之后仍保证本地切片至少 N 条（cross-encoder 全局同池排序会压制本地证据）
     reranked_docs = step_5_ensure_local_quota(chunk_list_score_sorted, chunk__score_sorted_topk)
     # 7. 保存结果
     state["reranked_docs"] = reranked_docs
+    # 8. 漏斗第二段（rerank 路）：合池 → 打分 → 断崖 → 保底（合并写入，不覆盖 rrf 段）
+    state["retrieval_funnel"] = _append_rerank_funnel(
+        state, pool_count, len(chunk_list_score_sorted),
+        len(chunk__score_sorted_topk), len(reranked_docs),
+    )
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     return state
+
+
+def _append_rerank_funnel(state, pool_count: int, scored_count: int,
+                          after_gap_count: int, final_count: int) -> dict:
+    """
+    把 rerank 段漏斗合并进 state 的 retrieval_funnel（不覆盖 rrf 段）。
+
+    :param state: 节点 state
+    :param pool_count: 合池后条数（RRF 存活 + 联网）
+    :param scored_count: 打分完成条数（降级时等于合池数，无真实分数）
+    :param after_gap_count: 断崖截断后条数
+    :param final_count: 保底后最终条数
+    :return: 合并后的完整 retrieval_funnel
+    """
+    funnel = dict(state.get("retrieval_funnel") or {})
+    docs = state.get("reranked_docs") or []
+    # 降级判据：合池非空、最高分为 0、且断崖未淘汰任何条
+    #   → 说明 step_3 走了 RerankError 的"补零分返回原序"分支，分数不可信
+    top_score = max((doc.get("score") or 0.0) for doc in docs) if docs else 0.0
+    degraded = bool(pool_count) and top_score == 0.0 and after_gap_count == pool_count
+    funnel["rerank"] = {
+        "pool": pool_count,
+        "scored": scored_count,
+        "after_gap": after_gap_count,
+        "final": final_count,
+        "degraded": degraded,
+        "top_score": round(float(top_score), 4),
+    }
+    logger.info(
+        f"Rerank 漏斗：合池={pool_count} → 打分={scored_count} → "
+        f"断崖后={after_gap_count} → 最终={final_count}（降级={degraded}，最高分={top_score}）"
+    )
+    return funnel
 
 
 if __name__ == "__main__":

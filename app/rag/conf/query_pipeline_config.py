@@ -27,10 +27,16 @@ class QueryPipelineConfig:
     rerank_min_local_keep: int  # 分区保底：本地（milvus）切片至少保留条数（0 = 关闭）
     rerank_gap_ratio: float  # 断崖检测：相对落差阈值
     rerank_gap_abs: float  # 断崖检测：绝对分差阈值
+    # 证据闸门：整批最高精排分的绝对下限。低于该值 → 整批判定为"无关噪声"并丢弃。
+    # 0 = 关闭闸门（默认，零行为变化）。BGE-reranker 是 logit 域，阈值须用标定脚本实测，
+    # 不要照抄其它项目的数值。
+    evidence_min_score: float
 
     # ==================== 多路融合（node_rrf）====================
     rrf_k: int  # RRF 平滑参数，削弱排名影响
-    rrf_top: int  # 融合后保留条数
+    # 三段预算之二（融合保留数）：RRF 融合后保留条数。
+    # 必须显著大于最终 topK，否则 rerank 无候选可淘汰，退化成"排序器"。
+    rrf_top: int
 
     # ==================== 商品名确认（node_item_name_confirm）====================
     item_name_high_threshold: float  # 高置信阈值，达到即确认
@@ -42,12 +48,20 @@ class QueryPipelineConfig:
     # ==================== 切片检索（node_search_embedding / node_search_embedding_hyde）====================
     chunk_search_dense_weight: float  # 切片混合检索：稠密向量权重
     chunk_search_sparse_weight: float  # 切片混合检索：稀疏向量权重
-    chunk_search_limit: int  # 单路检索返回条数
+    # 三段预算之一（召回扇出基数）：单路检索返回条数。
+    # 与 rrf_top（融合保留）/ rerank_max_topk（成本天花板）构成"召回要大、最终要精"的漏斗。
+    chunk_search_limit: int
 
     # ==================== 答案生成（node_answer_output）====================
     max_context_chars: int  # 上下文总字符预算
     local_evidence_budget: int  # 本地知识库证据区预算
     web_evidence_budget: int  # 联网证据区预算
+
+    # ==================== 通道级超时（4 路召回节点共用，T4）====================
+    # 单路检索通道的耗时预算（秒）。超预算 → 该路按空结果降级，其余各路照常融合。
+    # 取值原则：显著大于 P99 正常耗时 —— 超时只"放弃等待"而不"中止底层调用"，
+    # 设得太小等于整路白算（底层仍占着资源跑完，结果却被丢弃）。
+    channel_timeout_s: float
 
     # ==================== 联网搜索（node_web_search_mcp）====================
     web_search_count: int  # MCP 联网搜索返回条数
@@ -67,12 +81,17 @@ query_pipeline_config = QueryPipelineConfig(
     rerank_min_topk=int(os.getenv("RERANK_MIN_TOPK", "3")),
     rerank_gap_ratio=float(os.getenv("RERANK_GAP_RATIO", "0.25")),
     rerank_gap_abs=float(os.getenv("RERANK_GAP_ABS", "0.5")),
+    # 默认 0 = 闸门关闭：这是本项改造的"零行为变化"保证 ——
+    # 标定脚本产出建议阈值后，由运维侧写入 EVIDENCE_MIN_SCORE 才真正生效。
+    evidence_min_score=float(os.getenv("EVIDENCE_MIN_SCORE", "0")),
     # 默认 3：cross-encoder 是全局同池打分（本地切片与联网结果一起排序），
     # 实测本地的短句证据会被高分网页挤出最终证据，故断崖截断后按来源补足本地切片
     rerank_min_local_keep=int(os.getenv("RERANK_MIN_LOCAL_KEEP", "3")),
     # ---- 多路融合 ----
     rrf_k=int(os.getenv("RRF_K", "60")),
-    rrf_top=int(os.getenv("RRF_TOP", "5")),
+    # 默认 10：与 rerank_max_topk(10) 相当，使融合后的候选池显著大于最终证据数，
+    # 让 cross-encoder 真正承担"淘汰"职责（旧值 5 < max_topk 10 → 漏斗方向反了）。
+    rrf_top=int(os.getenv("RRF_TOP", "10")),
     # ---- 商品名确认 ----
     item_name_high_threshold=float(os.getenv("ITEM_NAME_HIGH_THRESHOLD", "0.65")),
     item_name_mid_threshold=float(os.getenv("ITEM_NAME_MID_THRESHOLD", "0.50")),
@@ -82,11 +101,17 @@ query_pipeline_config = QueryPipelineConfig(
     # ---- 切片检索 ----
     chunk_search_dense_weight=float(os.getenv("CHUNK_SEARCH_DENSE_WEIGHT", "0.8")),
     chunk_search_sparse_weight=float(os.getenv("CHUNK_SEARCH_SPARSE_WEIGHT", "0.2")),
-    chunk_search_limit=int(os.getenv("CHUNK_SEARCH_LIMIT", "5")),
+    # 默认 12：单路召回基数。三路融合去重后候选池约 15~25 条，
+    # 显著大于 rerank_max_topk(10)，为断崖截断与分区保底留出筛选空间。
+    chunk_search_limit=int(os.getenv("CHUNK_SEARCH_LIMIT", "12")),
     # ---- 答案生成 ----
     max_context_chars=int(os.getenv("MAX_CONTEXT_CHARS", "12000")),
     local_evidence_budget=int(os.getenv("LOCAL_EVIDENCE_BUDGET", "8000")),
     web_evidence_budget=int(os.getenv("WEB_EVIDENCE_BUDGET", "2500")),
+    # ---- 通道级超时（4 路召回共用）----
+    # 默认 20s：本地 Milvus 检索通常亚秒级、Neo4j 一跳扩展也是毫秒级，
+    # 20s 已是 P99 的数十倍 —— 能拦住的只有"真挂起"，不会误杀正常慢查询。
+    channel_timeout_s=float(os.getenv("CHANNEL_TIMEOUT_S", "20")),
     # ---- 联网搜索 ----
     web_search_count=int(os.getenv("WEB_SEARCH_COUNT", "10")),
     # ---- 知识图谱检索 ----
@@ -134,6 +159,14 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
             f"配置非法：RERANK_GAP_RATIO({cfg.rerank_gap_ratio}) 与 RERANK_GAP_ABS({cfg.rerank_gap_abs}) "
             f"不能为负数"
         )
+    # 2.1 证据闸门：阈值必须非负。阈值 > 0 时要求 rerank 可用 ——
+    #     闸门判据取自精排分，rerank 恒降级时无分可读、闸门语义不确定。
+    #     本项目 rerank 常开（无开关配置项），故该互斥天然满足；
+    #     这里只保留非负校验，并把这个前提写进注释以免未来加开关时漏改。
+    if cfg.evidence_min_score < 0:
+        raise ConfigurationError(
+            f"配置非法：EVIDENCE_MIN_SCORE({cfg.evidence_min_score}) 不能为负数（0 表示关闭闸门）"
+        )
     # 3. 证据区预算之和不能超过总预算，否则历史对话预算会变成负数而被静默截断
     evidence_sum = cfg.local_evidence_budget + cfg.web_evidence_budget
     if evidence_sum > cfg.max_context_chars:
@@ -158,6 +191,29 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
         raise ConfigurationError(f"配置非法：CHUNK_SEARCH_LIMIT({cfg.chunk_search_limit}) 必须大于 0")
     if cfg.web_search_count <= 0:
         raise ConfigurationError(f"配置非法：WEB_SEARCH_COUNT({cfg.web_search_count}) 必须大于 0")
+    # 5.1 检索漏斗三段预算的方向不变式：
+    #     ① rrf_top 不能超过三路召回基数之和（宽松上界）——超过则融合"永远取不满"，
+    #        说明参数互相矛盾，应显式报错而不是让检索结果静默劣化；
+    #     ② 最终证据池 = RRF 池 + 联网池，故 rerank_max_topk 不能超过二者之和，
+    #        否则意味着"配置期望的证据数大于所有来源能提供的总量"。
+    three_route_capacity = 3 * cfg.chunk_search_limit
+    if cfg.rrf_top > three_route_capacity:
+        raise ConfigurationError(
+            f"配置冲突：RRF_TOP({cfg.rrf_top}) 不能大于三路召回容量之和 "
+            f"3 * CHUNK_SEARCH_LIMIT({cfg.chunk_search_limit}) = {three_route_capacity}"
+        )
+    merged_capacity = cfg.rrf_top + cfg.web_search_count
+    if cfg.rerank_max_topk > merged_capacity:
+        raise ConfigurationError(
+            f"配置冲突：RERANK_MAX_TOPK({cfg.rerank_max_topk}) 不能大于 "
+            f"RRF_TOP({cfg.rrf_top}) + WEB_SEARCH_COUNT({cfg.web_search_count}) = {merged_capacity}"
+            f"（最终证据池 = RRF 池 + 联网池）"
+        )
+    # 5.2 通道级超时必须为正（0 或负数会让每一路都立即超时 → 检索恒为空）
+    if cfg.channel_timeout_s <= 0:
+        raise ConfigurationError(
+            f"配置非法：CHANNEL_TIMEOUT_S({cfg.channel_timeout_s}) 必须大于 0"
+        )
     # 6. 检索权重必须为非负（Milvus WeightedRanker 不接受负权重）
     for name, value in (
         ("ITEM_NAME_MATCH_DENSE_WEIGHT", cfg.item_name_match_dense_weight),
