@@ -32,9 +32,6 @@ query_graph.set_entry_point("node_item_name_confirm")
 # None -> 第一个节点已经顺利的识别出了 item_names 提问没有问题
 # str  -> 提问是空 | 有不确定的item_names  | 没有识别对应的item_name
 def node_item_name_confirm_after_router(state: QueryGraphState):
-    # 用 .get 而非 [] 索引：与 node_item_name_confirm.step_6 中 `if "answer" in state` 的
-    # 防御口径保持一致 —— 确权成功分支会删除 answer 键，若调用方传入的 state 未携带该键，
-    # 直接索引会抛 KeyError；经 create_query_default_state 构造的完整 state 下行为完全等价。
     if state.get('answer'):
         # 不为空!（确权失败，已写入兜底提示）→ 直接进入答案输出
         logger.warning(f"node_item_name_confirm_无法继续向后执行: {state['answer']}")
