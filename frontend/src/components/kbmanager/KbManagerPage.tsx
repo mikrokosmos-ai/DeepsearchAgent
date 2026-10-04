@@ -42,11 +42,14 @@ const STATUS_CLASS: Record<string, string> = {
 export function KbManagerPage() {
   const { message } = AntApp.useApp();
   const kb = useKbDocs();
-  const [selected, setSelected] = useState<KbDocument | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // 从列表实时派生：重建/启停后 status 与「已编辑未重建」标记自动刷新
+  const selected = kb.docs.find((doc) => doc.doc_id === selectedId) ?? null;
+
   function openDoc(doc: KbDocument) {
-    setSelected(doc);
+    setSelectedId(doc.doc_id);
     setDrawerOpen(true);
   }
 

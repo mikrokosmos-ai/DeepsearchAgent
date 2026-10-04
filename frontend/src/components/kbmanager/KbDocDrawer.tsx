@@ -101,7 +101,8 @@ export function KbDocDrawer({
     if (open && tab === "chunks" && docId) {
       void loadChunks();
     }
-  }, [open, tab, docId, loadChunks]);
+    // status 变化（如重建完成）后重新拉取切片
+  }, [open, tab, docId, doc?.status, loadChunks]);
 
   async function handleSave(reindex: boolean) {
     if (!docId || busy) {
