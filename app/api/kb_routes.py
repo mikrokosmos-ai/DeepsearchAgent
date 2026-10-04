@@ -1,18 +1,9 @@
 """
-知识库导入接口（D9：入库能力对外暴露）
+知识库导入接口
 
 承接前端「知识导入」页：接收 PDF / Markdown 文件 → 落盘 → 后台执行入库链路
 （`kb_import_app`）→ 前端通过轮询与 WebSocket 双通道观察节点进度。
 
-设计说明：
-    1. **复用既有通道**：进度走现有 `WS /ws/{thread_id}`（经由 `PipelineEventBridge`
-       把入库链路的 SSE 进度转成 `kb_progress` 事件），不新开推送通道；
-    2. **状态复用** `app/utils/task_utils.py` 的内存态登记，与对话链路共用同一套
-       查询函数（`get_task_status` / `get_done_task_list` / `get_running_task_list`）；
-    3. **不阻塞事件循环**：`kb_import_app.invoke` 是同步阻塞调用（MinerU / LLM /
-       向量化），放到线程池执行，否则会连带卡住 WebSocket 推送；
-    4. **内存态边界**：任务元数据保存在模块级字典中，与 `task_utils` 一致 ——
-       仅适用于单进程部署（本项目 uvicorn 默认单 worker），多 worker 需换 Redis/DB。
 """
 
 import asyncio
@@ -26,6 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.context import set_thread_context
 from app.api.rag_event_bridge import PipelineEventBridge
+from app.core import kb_doc_service
 from app.core.cancel import TaskCancelledError, clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
 from app.core.runtime_paths import KB_IMPORT_DIR, kb_output_dir
@@ -108,8 +100,11 @@ async def _run_import_task(task_id: str, file_path: Path, thread_id: str) -> Non
 
         with PipelineEventBridge(task_id, event_prefix="kb", topic="知识库导入"):
             # 同步阻塞调用放入线程池：不阻塞事件循环，WebSocket 进度才能实时出去
-            await asyncio.to_thread(kb_import_app.invoke, state)
+            # 接住返回 state：T10 需要从中取 item_name / md_path / chunks 登记 kb_document
+            final_state = await asyncio.to_thread(kb_import_app.invoke, state)
 
+        #登记（非侵入：不改导入图，只消费返回 state）；失败不影响导入成败判定
+        kb_doc_service.register_from_import(final_state, task_id)
 
         add_done_task(task_id, "__end__", True)
         update_task_status(task_id, TASK_STATUS_COMPLETED)

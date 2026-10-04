@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.agent.main_agent import run_deep_agent
+from app.api.kb_doc_routes import router as kb_doc_router
 from app.api.kb_routes import router as kb_router
 from app.api.lifespan import lifespan
 from app.api.monitor import manager
@@ -40,11 +41,23 @@ from app.core.tool_budget import reset_budgets
 from app.core.runtime_paths import OUTPUT_DIR, UPDATED_SESSIONS_DIR
 # 主智能体问答历史的回读入口（与 RAG 多轮历史分离的独立集合）
 from app.rag.repositories.history_repo import get_agent_messages
+from app.rag.repositories.kb_doc_repo import normalize_stale_reindexing
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
-# 知识库导入接口（D9）：/api/kb/import、/api/kb/task/{id}、/api/kb/tasks
+# 知识库导入接口：
 app.include_router(kb_router)
+# 知识库文档管理接口：
+app.include_router(kb_doc_router)
+
+# 启动归一化：上次进程中断留下的 processing / reindexing 登记置为 failed。
+# 此时 indexed_hash 未被改写 → 重新触发 reindex 安全幂等。
+# 放在模块导入期（而非 lifespan）以便测试可直接触发，且失败不影响服务启动。
+try:
+    normalize_stale_reindexing()
+except Exception as _e:  # noqa: BLE001
+    logger.warning(f"[KB] 启动归一化跳过（不影响服务启动）：{_e}")
+
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}
