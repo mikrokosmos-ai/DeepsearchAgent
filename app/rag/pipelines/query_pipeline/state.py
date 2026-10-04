@@ -23,6 +23,19 @@ class QueryGraphState(TypedDict):
     # --- 排序过程中的数据 ---
     rrf_chunks: list  # RRF 融合排序后的切片
     reranked_docs: list  # 重排序后的最终 Top-K 文档
+    # 检索漏斗指标：各路召回量 / 跨路一致性 / 每段淘汰数。
+    # 由 node_rrf 写入第一段（rrf），node_rerank 追加第二段（rerank）；
+    retrieval_funnel: dict
+
+    # --- 内部标记（节点间传参，不对外暴露语义）---
+    _rerank_degraded: bool  # 重排是否走了"补零分"降级分支（闸门据此放行）
+    _evidence_gate_blocked: bool  # 证据闸门是否拦截了整批（供工具区分"无关"与"没命中"）
+
+    # --- 通道级耗时（T4）：4 路并行各写独立字段 ---
+    channel_stat_embedding: dict  # {"status": ok|timeout|error, "elapsed_s": float, "count": int}
+    channel_stat_hyde: dict
+    channel_stat_kg: dict
+    channel_stat_web: dict
 
     # --- 生成过程中的数据 ---
     prompt: str  # 组装好的 Prompt
@@ -51,6 +64,13 @@ query_graph_default_state: QueryGraphState = {
     "kg_triples": [],
     "rrf_chunks": [],
     "reranked_docs": [],
+    "retrieval_funnel": {},
+    "_rerank_degraded": False,
+    "_evidence_gate_blocked": False,
+    "channel_stat_embedding": {},
+    "channel_stat_hyde": {},
+    "channel_stat_kg": {},
+    "channel_stat_web": {},
     "prompt": "",
     "answer": "",
     "item_names": [],

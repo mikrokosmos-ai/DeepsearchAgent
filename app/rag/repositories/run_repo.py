@@ -1,5 +1,5 @@
 """
-主智能体运行元数据访问层（可观测性与评测）
+主智能体运行元数据访问层
 """
 
 from datetime import datetime
@@ -20,6 +20,7 @@ def save_agent_run(
     tool_usage: Optional[Dict[str, int]] = None,
     failed_tools: Optional[Dict[str, str]] = None,
     report_summary: Optional[Dict[str, Any]] = None,
+    retrieval_funnel: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     写入一条任务运行元数据
@@ -31,6 +32,7 @@ def save_agent_run(
     :param tool_usage: 各工具调用次数快照（`tool_budget.get_usage`）
     :param failed_tools: 本次故障短路的工具 -> 首因（`tool_failfast.get_failed_tools`）
     :param report_summary: 子智能体返回契约汇总（`subagent_reports.summarize`）
+    :param retrieval_funnel: 检索漏斗指标（各通道召回量 / 跨路一致性 / 逐段淘汰数）
     :return: 是否写入成功；任何异常都返回 False 且不抛出
     """
     try:
@@ -38,6 +40,8 @@ def save_agent_run(
         failed = dict(failed_tools or {})
         summary = dict(report_summary or {})
         truncated = list(summary.get("truncated") or [])
+        # 漏斗指标可能含 set 等非 BSON 类型；统一归一化为纯基础类型
+        funnel = _normalize_funnel(retrieval_funnel)
 
         doc = {
             "session_id": str(session_id),
@@ -58,6 +62,7 @@ def save_agent_run(
                 "unparsed": list(summary.get("unparsed") or []),
             },
             "truncated_any": bool(truncated),
+            "retrieval_funnel": funnel,
         }
 
         mongo_tool = get_history_mongo_tool()
@@ -67,6 +72,30 @@ def save_agent_run(
         # 收尾路径上绝不抛：写失败只记录，不影响任务本身的成败判定
         logger.warning(f"保存任务运行元数据失败（不影响任务本身）：session={session_id}，原因：{e}")
         return False
+
+
+def _normalize_funnel(funnel: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    把漏斗指标归一化为可 BSON 序列化的结构（set -> list，dict 递归）。
+
+    :param funnel: 原始漏斗指标（可能含 set / 非基础类型）
+    :return: 纯基础类型结构；非法输入返回 {}
+    """
+    if not isinstance(funnel, dict):
+        return {}
+
+    def _conv(value):
+        if isinstance(value, dict):
+            return {str(k): _conv(v) for k, v in value.items()}
+        if isinstance(value, (set, frozenset)):
+            return sorted(str(v) for v in value)
+        if isinstance(value, (list, tuple)):
+            return [_conv(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    return _conv(funnel)
 
 
 def get_agent_runs(session_id: str, limit: int = DEFAULT_RUNS_LIMIT) -> List[Dict[str, Any]]:

@@ -36,6 +36,11 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
+from app.core.retrieval_funnel_store import (
+    clear_funnel as clear_retrieval_funnel,
+    get_funnel as get_retrieval_funnel,
+    reset_funnel as reset_retrieval_funnel,
+)
 from app.core.tool_failfast import clear_tool_failures, get_failed_tools
 from app.core.subagent_reports import (
     clear_reports as clear_subagent_reports,
@@ -122,6 +127,9 @@ async def run_deep_agent(task_query, session_id):
 
     # 运行元数据：进入函数即开始计时，收尾时连同结局一起写入 agent_run 集合
     started_at = time.perf_counter()
+    # 检索漏斗（T5）：thread_id 跨任务复用，启动前必须清一次 ——
+    # 否则上一次任务的漏斗会残留，被本次收尾当成"本次指标"写入（静默失真）。
+    reset_retrieval_funnel(session_id)
     # 结局标记由各分支显式设置；默认 unknown 便于暴露"漏设"（收尾时读它落库）
     outcome = "unknown"
 
@@ -279,6 +287,8 @@ async def run_deep_agent(task_query, session_id):
         report_summary = summarize_subagent_reports(session_id)
         tool_usage = get_budget_usage(session_id)
         failed_tools = get_failed_tools(session_id)
+        # 检索漏斗：由 local_rag_tool 在每次检索后写入会话级收集器，此处取最后一次
+        retrieval_funnel = get_retrieval_funnel(session_id)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         # 落库函数绝不抛；写失败只记 warning，不影响任务本身的成败判定
         save_agent_run(
@@ -289,11 +299,13 @@ async def run_deep_agent(task_query, session_id):
             tool_usage=tool_usage,
             failed_tools=failed_tools,
             report_summary=report_summary,
+            retrieval_funnel=retrieval_funnel,
         )
         # 收尾日志（含运行元数据与子智能体契约汇总）
         logger.info(
             f"[MainAgent] 运行元数据：session_id={session_id}，结局={outcome}，"
-            f"耗时={elapsed_ms}ms，工具用量={tool_usage}，故障工具={list(failed_tools)}"
+            f"耗时={elapsed_ms}ms，工具用量={tool_usage}，故障工具={list(failed_tools)}，"
+            f"检索漏斗={retrieval_funnel or '（本次未触发本地检索）'}"
         )
         if report_summary["count"]:
             logger.info(
@@ -305,6 +317,7 @@ async def run_deep_agent(task_query, session_id):
         clear_tool_failures(session_id)
         clear_budgets(session_id)
         clear_subagent_reports(session_id)
+        clear_retrieval_funnel(session_id)
 
 
 if __name__ == "__main__":
