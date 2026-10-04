@@ -5,6 +5,7 @@ Embedding 客户端管理器
 """
 
 import threading
+import time
 from typing import Optional
 
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
@@ -24,6 +25,11 @@ class EmbeddingClientManager:
         self._init_lock = threading.Lock()
         # 推理串行锁（用途见 encode()）
         self._infer_lock = threading.Lock()
+        # 最近一次推理的锁等待耗时（秒）与推理耗时（秒）。
+        # 用于区分「通道超时是锁竞争造成的」还是「Milvus/模型真的慢」——
+        # 4 路并行时另 1 路可能正持有 _infer_lock，把锁等待误诊为检索慢会得出错误结论。
+        self.last_lock_wait_s: float = 0.0
+        self.last_infer_s: float = 0.0
 
     def init(self):
         # 快路径：已加载则直接返回（不加锁，避免热路径上的无谓开销）
@@ -90,7 +96,11 @@ class EmbeddingClientManager:
 
         logger.info(f"开始为 {len(texts)} 条文本生成混合向量")
 
+        # 锁等待单独计时：等待期间并没有在算，把这部分算进"检索耗时"会误判
+        _wait_start = time.perf_counter()
         with self._infer_lock:
+            self.last_lock_wait_s = time.perf_counter() - _wait_start
+            _infer_start = time.perf_counter()
             try:
                 embeddings = self.client.encode_documents(texts)
             except Exception as e:
@@ -98,6 +108,12 @@ class EmbeddingClientManager:
                     f"BGE-M3 向量化失败（{len(texts)} 条文本）",
                     node_name="embedding.encode", cause=e
                 ) from e
+            self.last_infer_s = time.perf_counter() - _infer_start
+        if self.last_lock_wait_s > 1.0:
+            logger.warning(
+                f"BGE-M3 推理锁等待 {self.last_lock_wait_s:.2f}s（非模型耗时；"
+                f"4 路并行时其它分支可能正持锁）"
+            )
 
             # 模型返回的 sparse 是整批共享的 CSR 矩阵，需按 indptr 切段拆成"每条文本一个 dict"
             sparse_matrix = embeddings["sparse"]

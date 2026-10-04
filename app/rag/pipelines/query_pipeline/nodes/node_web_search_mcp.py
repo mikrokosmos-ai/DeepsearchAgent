@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 
 from agents.mcp import MCPServerStreamableHttp
 
@@ -16,6 +17,8 @@ DASHSCOPE_API_KEY = mcp_config.api_key
 # 联网搜索返回条数（来源：app/conf/query_pipeline_config.py，默认值等于改造前调用点的字面量 10）
 # 说明：函数默认值与调用点统一使用本常量，避免同一个可调参数出现两处取值来源。
 WEB_SEARCH_COUNT = query_pipeline_config.web_search_count
+# 通道级耗时预算：MCP 调用本身是异步的，用 asyncio.wait_for 原生超时
+CHANNEL_TIMEOUT_S = query_pipeline_config.channel_timeout_s
 
 """
   节点: 联网搜索（百炼 MCP）(node_web_search_mcp)
@@ -98,20 +101,41 @@ def node_web_search_mcp(state):
     #        ]
     #    }
     pages = []
+    status = "ok"
+    started = time.perf_counter()
     try:
-        mcp_result = asyncio.run(node_web_search_mcp_async(rewritten_query, count=WEB_SEARCH_COUNT))
-        # 4. 结果解析
+        # 4. 包通道超时：MCP 是异步调用，直接 wait_for 即可（无需线程池）。
+        #    超时按空降级 —— 联网是补充能力，不该钳制其余三路。
+        mcp_result = asyncio.run(
+            asyncio.wait_for(
+                node_web_search_mcp_async(rewritten_query, count=WEB_SEARCH_COUNT),
+                timeout=CHANNEL_TIMEOUT_S,
+            )
+        )
+        # 5. 结果解析
         text_dict = json.loads(mcp_result.content[0].text)
         pages = text_dict.get('pages', [])
         logger.info(f"联网搜索命中{len(pages)}条结果，明细：{pages}")
+    except asyncio.TimeoutError:
+        status = "timeout"
+        logger.warning(
+            f"联网搜索超出耗时预算 {CHANNEL_TIMEOUT_S}s，按空结果降级"
+            f"（真实耗时 {time.perf_counter() - started:.2f}s）"
+        )
+        pages = []
     except Exception as e:
         # 联网检索是可选补充能力：远端 MCP 超时/限流/返回结构异常时只告警，
         # 返回空结果让查询继续走其余三路召回（不阻断主链路）。
+        status = "error"
         logger.opt(exception=True).warning(f"联网搜索失败，已跳过该路召回：{e}")
         pages = []
+    elapsed = time.perf_counter() - started
     # 记录任务结束
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
-    return {"web_search_docs": pages}
+    return {
+        "web_search_docs": pages,
+        "channel_stat_web": {"status": status, "elapsed_s": round(elapsed, 3), "count": len(pages)},
+    }
 
 
 if __name__ == '__main__':

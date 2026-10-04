@@ -6,6 +6,7 @@ from app.rag.clients.embedding_client import generate_embeddings
 from app.rag.clients.milvus_client import get_milvus_client
 from app.rag.repositories.vector_search_repo import create_hybrid_search_requests, hybrid_search
 from app.core.logger import logger, node_log, step_log
+from app.rag.pipelines.query_pipeline.channel_timeout import run_with_timeout
 from app.rag.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_done_task, add_running_task
 
@@ -15,8 +16,12 @@ CHUNK_SEARCH_WEIGHTS = (
     query_pipeline_config.chunk_search_dense_weight,
     query_pipeline_config.chunk_search_sparse_weight,
 )
-# 单路检索返回条数
+# 三段预算之一（召回扇出基数）：本路返回条数。
+# 与 rrf_top / rerank_max_topk 构成"召回要大、最终要精"的漏斗 ——
+# 本值须显著大于 rerank_max_topk，否则候选池太小、rerank 无料可淘汰。
 CHUNK_SEARCH_LIMIT = query_pipeline_config.chunk_search_limit
+# 通道级耗时预算：超预算按空结果降级，不钳制其余三路
+CHANNEL_TIMEOUT_S = query_pipeline_config.channel_timeout_s
 
 """
   节点: 切片向量检索 (node_search_embedding)
@@ -92,13 +97,22 @@ def node_search_embedding(state):
     add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 参数获取和校验(item_names / rewritten_query)
     item_names, rewritten_query = step_1_data_validates(state)
-    # 3. 问题向量化获取稠密和稀疏向量
-    dense_vector, sparse_vector = step_2_rewritten_query_vector(rewritten_query)
-    # 4. 进行混合检索(过滤条件/双向量和权重设置/输出字段控制)
-    mivlus_result = step_3_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
-    # 5. 返回结果即可
+    # 3+4. 向量化 + 混合检索整体包通道超时：
+    #      两者都依赖 embedding 模型与 Milvus，同属本路的"耗时预算"范围 ——
+    #      分开计时反而会把"模型推理慢"漏出预算之外。
+    def _do_search():
+        dense_vector, sparse_vector = step_2_rewritten_query_vector(rewritten_query)
+        return step_3_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
+
+    result, status, elapsed = run_with_timeout(_do_search, CHANNEL_TIMEOUT_S, "embedding")
+    mivlus_result = result if status == "ok" and result is not None else []
+    # 5. 返回结果 + 本路耗时/降级状态（供漏斗观测；不参与检索语义）
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
-    return {"embedding_chunks": mivlus_result}
+    return {
+        "embedding_chunks": mivlus_result,
+        # 每路用独立字段名：LangGraph 无 reducer 时，两个并行分支写同一 key 会互相覆盖
+        "channel_stat_embedding": {"status": status, "elapsed_s": round(elapsed, 3), "count": len(mivlus_result)},
+    }
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from app.rag.clients.milvus_client import get_milvus_client
 from app.rag.conf.milvus_config import milvus_config
 from app.rag.conf.query_pipeline_config import query_pipeline_config
 from app.core.logger import logger, node_log, step_log
+from app.rag.pipelines.query_pipeline.channel_timeout import run_with_timeout
 from app.rag.repositories import graph_repo
 from app.rag.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_done_task, add_running_task
@@ -30,6 +31,8 @@ from app.utils.task_utils import add_done_task, add_running_task
 ENTITY_COLLECTION_NAME = milvus_config.entity_name_collection
 KG_MAX_SEED_CANDIDATES = query_pipeline_config.kg_max_seed_candidates
 KG_MAX_TOTAL_TRIPLES = query_pipeline_config.kg_max_total_triples
+# 通道级耗时预算：Neo4j 一跳扩展曾以 137(SIGKILL) 退出并带停整个容器栈
+CHANNEL_TIMEOUT_S = query_pipeline_config.channel_timeout_s
 
 # 图谱证据在 RRF 融合中的固定"距离"：图谱是确定性结构化知识，其相对排序由 RRF 权重决定
 KG_CHUNK_DISTANCE = 1.0
@@ -142,19 +145,32 @@ def node_query_kg(state):
     kg_chunks: List[Dict[str, Any]] = []
     triples: List[Dict[str, Any]] = []
     description = ""
+    status, elapsed = "ok", 0.0
     try:
         item_names, query = step_1_data_validates(state)
-        seeds = step_2_align_seed_entities(query, item_names)
-        triples = step_3_expand_one_hop(seeds)
-        kg_chunks, description = step_4_build_kg_evidence(triples)
+
+        # 本路全链路（实体对齐 + 一跳扩展 + 组装）包通道超时。
+        # 超时按空降级：图谱是可选能力，不该让整条 query 陪它挂起
+        # （Neo4j 曾有 OOM 退出前科）。
+        def _do_kg():
+            seeds = step_2_align_seed_entities(query, item_names)
+            tr = step_3_expand_one_hop(seeds)
+            chunks, desc = step_4_build_kg_evidence(tr)
+            return chunks, tr, desc
+
+        built, status, elapsed = run_with_timeout(_do_kg, CHANNEL_TIMEOUT_S, "kg")
+        if status == "ok" and built is not None:
+            kg_chunks, triples, description = built
     except Exception as e:
         # 知识图谱是可选能力：失败只告警，让查询继续走其余三路
         logger.opt(exception=True).warning(f"知识图谱检索失败，已跳过该路召回：{e}")
         kg_chunks, triples, description = [], [], ""
+        status = "error"
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 与其它并行分支保持一致：只返回本路产出的字段（由 LangGraph 合并进全局 state）
     return {
         "kg_chunks": kg_chunks,
         "kg_triples": triples,
         "graph_relation_description": description,
+        "channel_stat_kg": {"status": status, "elapsed_s": round(elapsed, 3), "count": len(kg_chunks)},
     }
