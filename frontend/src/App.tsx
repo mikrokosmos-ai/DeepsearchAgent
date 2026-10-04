@@ -16,12 +16,13 @@ import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
 import { ImportPage } from "./components/importer/ImportPage";
+import { KbManagerPage } from "./components/kbmanager/KbManagerPage";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import type { ConnectionState, UploadedItem } from "./types";
 
-/** 顶层视图：对话研搜 / 知识导入 */
-type AppView = "chat" | "import";
+/** 顶层视图：对话研搜 / 知识导入 / 知识库管理 */
+type AppView = "chat" | "import" | "kb";
 
 function connectionLabel(state: ConnectionState): string {
   const labels: Record<ConnectionState, string> = {
@@ -173,6 +174,14 @@ export default function App() {
             <AppstoreOutlined aria-hidden />
             <span>知识导入</span>
           </button>
+          <button
+            className={view === "kb" ? "sidebar-nav-item sidebar-nav-item--active" : "sidebar-nav-item"}
+            onClick={() => setView("kb")}
+            type="button"
+          >
+            <DatabaseOutlined aria-hidden />
+            <span>知识库管理</span>
+          </button>
         </nav>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
@@ -238,6 +247,10 @@ export default function App() {
         {view === "import" ? (
           <section className="import-surface">
             <ImportPage threadId={session.threadId} />
+          </section>
+        ) : view === "kb" ? (
+          <section className="import-surface">
+            <KbManagerPage />
           </section>
         ) : (
           <>

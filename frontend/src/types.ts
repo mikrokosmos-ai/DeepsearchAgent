@@ -134,3 +134,109 @@ export interface KbImportTask extends KbTaskStatus {
   /** 0-100，由 done_list 经 IMPORT_STEPS 权重换算得到 */
   progress: number;
 }
+
+/* ========================= 知识库文档管理（/api/kb/docs*）========================= */
+
+/** 文档状态（与后端 kb_doc_repo 的状态常量逐字对应） */
+export type KbDocStatus =
+  | "active"
+  | "inactive"
+  | "processing"
+  | "reindexing"
+  | "failed"
+  | "deleted";
+
+/** 「飞行中」状态：此时禁止编辑 / 重建 / 启停 / 删除（后端每 doc 单飞） */
+export const KB_DOC_BUSY_STATUSES: KbDocStatus[] = ["processing", "reindexing"];
+
+/** 一条知识库文档登记（kb_document 集合） */
+export interface KbDocument {
+  doc_id: string;
+  /** 三存储的删除锚点，与导入链路一致 */
+  item_name: string;
+  file_title: string;
+  /** 只读展示；后端不接受前端传路径 */
+  md_path: string;
+  output_dir: string;
+  status: KbDocStatus;
+  chunk_count: number;
+  /** 正文当前 hash */
+  content_hash: string;
+  /** 最后一次重建时写入的 hash；与 content_hash 不等 = 已编辑未重建 */
+  indexed_hash: string;
+  /** 由后端派生：content_hash != indexed_hash */
+  edited_not_reindexed: boolean;
+  edit_log: KbDocEditLogEntry[];
+  origin_task_id: string;
+  last_reindex_task_id: string;
+  ts: number;
+}
+
+export interface KbDocEditLogEntry {
+  action: string;
+  ts: number;
+  [key: string]: unknown;
+}
+
+/** GET /api/kb/docs */
+export interface KbDocListResponse {
+  total: number;
+  items: KbDocument[];
+}
+
+/** GET /api/kb/docs/{id}/content */
+export interface KbDocContentResponse {
+  doc_id: string;
+  content: string;
+  content_hash: string;
+  indexed_hash: string;
+  edited_not_reindexed: boolean;
+}
+
+/** Milvus chunks 集合中的一条切片（只读） */
+export interface KbChunk {
+  chunk_id?: string;
+  file_title?: string;
+  title?: string;
+  parent_title?: string;
+  part?: string;
+  content?: string;
+}
+
+/** GET /api/kb/docs/{id}/chunks */
+export interface KbDocChunksResponse {
+  doc_id: string;
+  chunks: KbChunk[];
+}
+
+/** PUT /api/kb/docs/{id}/content 的保存结果 */
+export interface KbDocSaveResult {
+  status: "saved" | "saved_and_reindexing" | string;
+  save?: { doc?: KbDocument; [key: string]: unknown };
+  reindex?: KbReindexResult;
+}
+
+/** POST /api/kb/docs/{id}/reindex 的返回 */
+export interface KbReindexResult {
+  status: string;
+  doc_id: string;
+  task_id?: string;
+  scope?: string;
+  purge?: Record<string, unknown>;
+}
+
+/** POST /api/kb/docs/sync 的返回 */
+export interface KbDocSyncItem {
+  md_path: string;
+  status: string;
+  item_name?: string;
+}
+
+export interface KbDocSyncResult {
+  scanned: number;
+  registered: number;
+  /** MD 在但向量库无命中 → 登记为 inactive（待重建） */
+  inactive: number;
+  skipped: number;
+  items: KbDocSyncItem[];
+}
