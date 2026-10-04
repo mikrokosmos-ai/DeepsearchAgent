@@ -10,7 +10,6 @@ from app.core.logger import logger, node_log, step_log
 from app.rag.pipelines.import_pipeline.state import ImportGraphState
 from app.utils.task_utils import add_running_task, add_done_task
 
-# ====================== 全局配置（来源：app/conf/import_pipeline_config.py）======================
 CHUNK_MAX_SIZE = import_pipeline_config.chunk_max_size  # 500 触发二次切割
 CHUNK_SIZE = import_pipeline_config.chunk_size  # 单块长度
 CHUNK_OVERLAP = import_pipeline_config.chunk_overlap  # 块间重叠
