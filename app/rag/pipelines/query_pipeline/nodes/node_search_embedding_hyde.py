@@ -13,6 +13,7 @@ from app.rag.repositories.vector_search_repo import create_hybrid_search_request
 from app.rag.conf.milvus_config import milvus_config
 from app.rag.conf.query_pipeline_config import query_pipeline_config
 from app.core.logger import logger, node_log, step_log
+from app.rag.pipelines.query_pipeline.channel_timeout import run_with_timeout
 from app.prompts.loader import load_prompt
 
 # 切片混合检索参数（来源：app/conf/query_pipeline_config.py，默认值等于改造前的字面量现值）
@@ -22,8 +23,12 @@ CHUNK_SEARCH_WEIGHTS = (
     query_pipeline_config.chunk_search_dense_weight,
     query_pipeline_config.chunk_search_sparse_weight,
 )
-# 单路检索返回条数
+# 三段预算之一（召回扇出基数）：本路返回条数。
+# 与 rrf_top / rerank_max_topk 构成"召回要大、最终要精"的漏斗 ——
+# 本值须显著大于 rerank_max_topk，否则候选池太小、rerank 无料可淘汰。
 CHUNK_SEARCH_LIMIT = query_pipeline_config.chunk_search_limit
+# 通道级耗时预算（T4）：本路含一次 LLM 调用（HyDE 假设答案），故与其它路共用同一预算
+CHANNEL_TIMEOUT_S = query_pipeline_config.channel_timeout_s
 
 """
   节点: HyDE 向量检索 (node_search_embedding_hyde)
@@ -125,15 +130,20 @@ def node_search_embedding_hyde(state):
     add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 参数获取和校验(item_names / rewritten_query)
     item_names, rewritten_query = step_1_data_validates(state)
-    # 3. 根据重写的问题调用模型查询答案
-    hyde_answer = step_2_call_llm(rewritten_query)
-    # 4. 进行问题+答案拼接,并且生成对应的向量
-    dense_vector, sparse_vector = step_3_rewritten_hyde_vector(rewritten_query, hyde_answer)
-    # 5. 进行混合检索(过滤条件/双向量和权重设置/输出字段控制)
-    mivlus_result = step_4_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
+    # 3~5. HyDE 全链路（LLM 生成假设答案 → 向量化 → 混合检索）整体包通道超时
+    def _do_hyde():
+        hyde_answer = step_2_call_llm(rewritten_query)
+        dense_vector, sparse_vector = step_3_rewritten_hyde_vector(rewritten_query, hyde_answer)
+        return step_4_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
+
+    result, status, elapsed = run_with_timeout(_do_hyde, CHANNEL_TIMEOUT_S, "hyde")
+    mivlus_result = result if status == "ok" and result is not None else []
     # 6. 返回结果即可
     add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
-    return {"hyde_embedding_chunks": mivlus_result}
+    return {
+        "hyde_embedding_chunks": mivlus_result,
+        "channel_stat_hyde": {"status": status, "elapsed_s": round(elapsed, 3), "count": len(mivlus_result)},
+    }
 
 
 if __name__ == "__main__":
