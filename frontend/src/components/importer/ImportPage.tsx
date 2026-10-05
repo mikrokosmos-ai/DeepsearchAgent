@@ -56,6 +56,14 @@ export function ImportPage({ threadId }: ImportPageProps) {
     message.info("已请求取消，最多等当前节点执行完毕后停止");
   }
 
+  async function handleRemove(fileId: string) {
+    try {
+      await removeTask(fileId);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "移除任务失败，已保留该任务");
+    }
+  }
+
   return (
     <div className="admin-page">
       <header className="admin-page-header">
@@ -131,7 +139,7 @@ export function ImportPage({ threadId }: ImportPageProps) {
                 <TaskCard
                   key={task.fileId}
                   onCancel={handleCancel}
-                  onRemove={removeTask}
+                  onRemove={handleRemove}
                   task={task}
                 />
               ))}

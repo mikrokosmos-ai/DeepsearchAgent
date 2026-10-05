@@ -204,35 +204,6 @@ async def cancel_task(thread_id: str):
     return {"status": "cancelled", "thread_id": thread_id}
 
 
-@app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...), thread_id: str = Form(...)):
-    """
-    文件上传接口 (File Upload)。
-
-    目标：
-    1. 接收用户上传的一个或多个文件。
-    2. 保存到 `updated/sessions/session_{thread_id}` 目录。
-    3. 供 Agent 在后续任务中读取和分析。
-
-    Args:
-        files (List[UploadFile]): 文件对象列表。
-        thread_id (str): 关联的任务会话 ID。
-    """
-    # 上传文件先按会话隔离保存，避免不同任务读取到彼此的附件
-    target_dir = updated_dir / f"session_{thread_id}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    saved_files = []
-    for file in files:
-        file_path = target_dir / file.filename
-        # 直接复制文件流，避免大文件一次性读入内存
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file.filename)
-
-    return {"status": "uploaded", "files": saved_files}
-
-
 # 会话标识 / 文件名中的路径分隔符与 Windows 保留字符（穿越片段另判）
 _UNSAFE_NAME_CHARS = set('\\/:*?"<>|')
 
@@ -248,6 +219,52 @@ def _is_unsafe_identifier(value: str) -> bool:
     if ".." in value:
         return True
     return any(ch in _UNSAFE_NAME_CHARS or ord(ch) < 32 for ch in value)
+
+
+@app.post("/api/upload")
+async def upload_files(files: List[UploadFile] = File(...), thread_id: str = Form(...)):
+    """
+    文件上传接口 (File Upload)。
+
+    目标：
+    1. 接收用户上传的一个或多个文件。
+    2. 保存到 `updated/sessions/session_{thread_id}` 目录。
+    3. 供 Agent 在后续任务中读取和分析。
+
+    Args:
+        files (List[UploadFile]): 文件对象列表。
+        thread_id (str): 关联的任务会话 ID。
+    """
+    # 上传文件先按会话隔离保存，避免不同任务读取到彼此的附件。
+    # 与 DELETE 同源：标识必须裸名 → 会话目录必须是 updated/sessions 的直接子目录
+    # → 目标文件必须落在该会话目录内（否则 `../` 会写到会话目录之外）
+    if _is_unsafe_identifier(thread_id):
+        raise HTTPException(status_code=400, detail="非法会话标识")
+
+    session_root = updated_dir.resolve()
+    target_dir = (updated_dir / f"session_{thread_id}").resolve()
+    if target_dir.parent != session_root:
+        raise HTTPException(status_code=400, detail="拒绝访问：会话目录非法")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_files = []
+    for file in files:
+        raw_name = file.filename or ""
+        safe_name = Path(raw_name).name
+        if _is_unsafe_identifier(raw_name) or safe_name != raw_name:
+            raise HTTPException(status_code=400, detail=f"非法文件名：{raw_name}")
+
+        file_path = target_dir / safe_name
+        if not file_path.resolve().is_relative_to(target_dir):
+            raise HTTPException(status_code=400, detail="拒绝访问：只能上传到本会话目录")
+
+        # 直接复制文件流，避免大文件一次性读入内存
+        with file_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        saved_files.append(safe_name)
+
+    return {"status": "uploaded", "files": saved_files}
 
 
 @app.delete("/api/upload")

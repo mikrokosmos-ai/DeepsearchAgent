@@ -5,7 +5,7 @@
  * 进行中的任务额外提供「取消」入口（后端为协作式取消，见 app/core/cancel.py）。
  */
 import { CloseOutlined, FileTextOutlined, StopOutlined } from "@ant-design/icons";
-import { Alert, Button, Progress } from "antd";
+import { Alert, Button, Popconfirm, Progress } from "antd";
 
 import { formatFileSize } from "../../lib/nodes";
 import type { KbImportTaskItem } from "../../hooks/useKbImport";
@@ -70,13 +70,24 @@ export function TaskCard({ task, onRemove, onCancel }: TaskCardProps) {
               取消
             </Button>
           ) : null}
-          <Button
-            aria-label={`移除 ${task.file_name}`}
-            icon={<CloseOutlined />}
-            onClick={() => onRemove(task.fileId)}
-            size="small"
-            type="text"
-          />
+          <Popconfirm
+            cancelText="取消"
+            description={
+              canCancel
+                ? "该任务仍在进行中，移除会先请求取消；产物目录保留可回溯。"
+                : "仅移除这张卡片，已产出的文件不会被删除。"
+            }
+            okText="移除"
+            onConfirm={() => onRemove(task.fileId)}
+            title={`移除「${task.file_name}」？`}
+          >
+            <Button
+              aria-label={`移除 ${task.file_name}`}
+              icon={<CloseOutlined />}
+              size="small"
+              type="text"
+            />
+          </Popconfirm>
         </div>
       </header>
 

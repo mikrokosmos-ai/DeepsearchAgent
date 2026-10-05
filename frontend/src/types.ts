@@ -134,6 +134,14 @@ export interface KbTaskListResponse {
   tasks: KbTaskStatus[];
 }
 
+/** DELETE /api/kb/task/{id} 的响应：cancelled=true 表示移除前曾请求取消 */
+export interface KbTaskDeleteResponse {
+  status: "removed" | string;
+  task_id: string;
+  cancelled: boolean;
+  removed: boolean;
+}
+
 /** 前端展示用的任务模型：在后端字段之外补充本地进度与错误态 */
 export type KbTaskPhase = "uploading" | "processing" | "completed" | "failed";
 

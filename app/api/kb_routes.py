@@ -32,6 +32,7 @@ from app.utils.task_utils import (
     add_running_task,
     get_done_task_list,
     get_running_task_list,
+    clear_task,
     get_task_status,
     update_task_status,
 )
@@ -232,10 +233,52 @@ async def get_kb_task(task_id: str) -> Dict[str, Any]:
     return _task_payload(task_id, meta)
 
 
+@router.delete("/task/{task_id}")
+async def delete_kb_task(task_id: str) -> Dict[str, Any]:
+    """
+    移除一个导入任务的登记。
+
+    进行中的任务：先请求取消、再移除登记；已进入终态的任务只移除登记。
+    产物目录 `output/kb/{task_id}` 一律保留（可回溯），本接口不删任何文件。
+    """
+    meta = _kb_tasks.get(task_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    cancelled = False
+    if get_task_status(task_id) not in (TASK_STATUS_COMPLETED, TASK_STATUS_FAILED):
+        # 取消失败就不删登记：否则会留下「卡片没了但任务还在跑」的僵尸态
+        try:
+            request_cancel(task_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=409, detail=f"取消请求失败，已保留任务登记：{e}")
+        update_task_status(task_id, TASK_STATUS_FAILED)
+        meta["error"] = meta.get("error") or "用户已移除该导入任务"
+        cancelled = True
+
+    _kb_tasks.pop(task_id, None)
+    # 清掉该任务在 task_utils 的内存态进度，避免登记移除后残留
+    clear_task(task_id)
+    logger.info(f"已移除知识库导入任务登记：task_id={task_id}（曾请求取消={cancelled}）")
+    return {
+        "status": "removed",
+        "task_id": task_id,
+        "cancelled": cancelled,
+        "removed": True,
+    }
+
+
 @router.get("/tasks")
-async def list_kb_tasks() -> Dict[str, Any]:
-    """列出全部导入任务（按创建时间倒序，最新的在前）"""
-    items = [_task_payload(task_id, meta) for task_id, meta in _kb_tasks.items()]
+async def list_kb_tasks(thread_id: str = "") -> Dict[str, Any]:
+    """
+    列出导入任务（按创建时间倒序，最新的在前）。
+
+    """
+    items = [
+        _task_payload(task_id, meta)
+        for task_id, meta in _kb_tasks.items()
+        if not thread_id or meta.get("thread_id") == thread_id
+    ]
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return {"tasks": items}
 

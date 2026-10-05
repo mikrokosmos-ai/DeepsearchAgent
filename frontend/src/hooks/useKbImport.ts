@@ -11,7 +11,7 @@
  *      实时性更好，但轮询是无条件兜底，二者不冲突。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cancelKbTask, getKbTask, importKbFiles, listKbTasks } from "../lib/kbApi";
+import { cancelKbTask, deleteKbTask, getKbTask, importKbFiles, listKbTasks } from "../lib/kbApi";
 import { importProgress } from "../lib/nodes";
 import type { KbImportTask, KbTaskStatus } from "../types";
 
@@ -97,16 +97,16 @@ export function useKbImport(threadId: string) {
     );
   }, []);
 
-  /** 首次挂载：拉取后端已有任务（刷新页面后仍能看到进度） */
+  /** 首次挂载 / 手动刷新：只拉当前会话的任务 */
   const refreshFromServer = useCallback(async () => {
     try {
-      const response = await listKbTasks();
+      const response = await listKbTasks(threadId);
       const items = (response.tasks || []).map((status) => toTaskItem(status, status.task_id));
       setTasks(items);
     } catch (error) {
       setLastError(error instanceof Error ? error.message : "获取导入任务列表失败");
     }
-  }, []);
+  }, [threadId]);
 
   useEffect(() => {
     refreshFromServer().catch(() => undefined);
@@ -228,7 +228,12 @@ export function useKbImport(threadId: string) {
     [patchTask, threadId]
   );
 
-  const removeTask = useCallback((fileId: string) => {
+
+  const removeTask = useCallback(async (fileId: string) => {
+    const target = tasksRef.current.find((task) => task.fileId === fileId);
+    if (target?.task_id) {
+      await deleteKbTask(target.task_id);
+    }
     setTasks((previous) => previous.filter((task) => task.fileId !== fileId));
   }, []);
 

@@ -15,6 +15,7 @@ import type {
   KbDocSyncResult,
   KbImportResponse,
   KbReindexResult,
+  KbTaskDeleteResponse,
   KbTaskListResponse,
   KbTaskStatus
 } from "../types";
@@ -41,9 +42,21 @@ export async function getKbTask(taskId: string): Promise<KbTaskStatus> {
   );
 }
 
-/** 列出全部导入任务（按创建时间倒序） */
-export async function listKbTasks(): Promise<KbTaskListResponse> {
-  return requestJson<KbTaskListResponse>(`${API_BASE_URL}/api/kb/tasks`);
+/** 列出导入任务；带 threadId 时只取该会话发起的任务 */
+export async function listKbTasks(threadId?: string): Promise<KbTaskListResponse> {
+  const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+  return requestJson<KbTaskListResponse>(`${API_BASE_URL}/api/kb/tasks${query}`);
+}
+
+/**
+ * 移除一个导入任务的登记。
+ * 进行中的任务后端会先请求取消再移除（D3）；产物目录 output/kb/{task_id} 保留不动。
+ */
+export async function deleteKbTask(taskId: string): Promise<KbTaskDeleteResponse> {
+  return requestJson<KbTaskDeleteResponse>(
+    `${API_BASE_URL}/api/kb/task/${encodeURIComponent(taskId)}`,
+    { method: "DELETE" }
+  );
 }
 
 /** 取消一个正在进行的导入任务（后端置位协作式取消标志，最多等当前节点跑完） */
