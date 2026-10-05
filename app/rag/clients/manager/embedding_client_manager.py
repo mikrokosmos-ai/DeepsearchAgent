@@ -115,19 +115,19 @@ class EmbeddingClientManager:
                 f"4 路并行时其它分支可能正持锁）"
             )
 
-            # 模型返回的 sparse 是整批共享的 CSR 矩阵，需按 indptr 切段拆成"每条文本一个 dict"
-            sparse_matrix = embeddings["sparse"]
-            processed_sparse = []
-            for i in range(len(texts)):
-                start, end = sparse_matrix.indptr[i], sparse_matrix.indptr[i + 1]
-                indices = sparse_matrix.indices[start:end].tolist()
-                data = sparse_matrix.data[start:end].tolist()
-                processed_sparse.append({k: v for k, v in zip(indices, data)})
+        # 模型返回的 sparse 是整批共享的 CSR 矩阵，需按 indptr 切段拆成"每条文本一个 dict"
+        sparse_matrix = embeddings["sparse"]
+        processed_sparse = []
+        for i in range(len(texts)):
+            start, end = sparse_matrix.indptr[i], sparse_matrix.indptr[i + 1]
+            indices = sparse_matrix.indices[start:end].tolist()
+            data = sparse_matrix.data[start:end].tolist()
+            processed_sparse.append({k: v for k, v in zip(indices, data)})
 
-            result = {
-                "dense": [emb.tolist() for emb in embeddings["dense"]],
-                "sparse": processed_sparse,
-            }
+        result = {
+            "dense": [emb.tolist() for emb in embeddings["dense"]],
+            "sparse": processed_sparse,
+        }
 
         # 条数一致性校验：dense/sparse 任一与入参数量不符都说明模型输出异常，
         # 此时若继续写库会造成向量与文本错位，故在边界处直接失败
