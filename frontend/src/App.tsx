@@ -200,8 +200,12 @@ export default function App() {
     setStagedItems((previous) => previous.filter((item) => item.uid !== uid));
   }
 
-  function handleRemoveUploaded(uid: string) {
-    session.removeUploadedItem(uid);
+  async function handleRemoveUploaded(uid: string) {
+    try {
+      await session.removeUploadedItem(uid);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "移除附件失败");
+    }
   }
 
   function handleNewSession() {

@@ -40,6 +40,14 @@ export interface UploadResponse {
   files: string[];
 }
 
+
+export interface DeleteUploadResponse {
+  status: "deleted" | string;
+  name: string;
+  removed: boolean;
+  message?: string;
+}
+
 export interface OutputFile {
   name: string;
   type: "file" | string;

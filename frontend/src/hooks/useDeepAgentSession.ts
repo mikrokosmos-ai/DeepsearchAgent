@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, fetchSessionHistory, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import {
+  cancelTask,
+  deleteSessionFile,
+  fetchSessionHistory,
+  listSessionFiles,
+  startTask,
+  uploadSessionFiles
+} from "../lib/api";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -55,6 +62,9 @@ export function useDeepAgentSession() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadedItems, setUploadedItems] = useState<UploadedItem[]>([]);
+  // 供回调读取最新清单：回调不依赖 uploadedItems，避免每次上传都重建
+  const uploadedItemsRef = useRef<UploadedItem[]>([]);
+  uploadedItemsRef.current = uploadedItems;
 
   const clearSocketTimers = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -73,17 +83,19 @@ export function useDeepAgentSession() {
     uploadedNameSetRef.current.clear();
   }, []);
 
-  /** 移除一个已上传附件：仅收敛本地清单 */
-  const removeUploadedItem = useCallback((uid: string) => {
-    setUploadedItems((previous) => {
-      const target = previous.find((item) => item.uid === uid);
+  /** 移除一个已上传附件：先删磁盘（D1），成功后才收敛本地清单；失败时清单保持不变 */
+  const removeUploadedItem = useCallback(
+    async (uid: string) => {
+      const target = uploadedItemsRef.current.find((item) => item.uid === uid);
       if (!target) {
-        return previous;
+        return;
       }
+      await deleteSessionFile(threadId, target.name);
       uploadedNameSetRef.current.delete(target.name);
-      return previous.filter((item) => item.uid !== uid);
-    });
-  }, []);
+      setUploadedItems((previous) => previous.filter((item) => item.uid !== uid));
+    },
+    [threadId]
+  );
 
   const resetSession = useCallback(() => {
     const nextThreadId = createThreadId();

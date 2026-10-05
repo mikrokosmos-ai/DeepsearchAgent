@@ -233,6 +233,57 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
     return {"status": "uploaded", "files": saved_files}
 
 
+# 会话标识 / 文件名中的路径分隔符与 Windows 保留字符（穿越片段另判）
+_UNSAFE_NAME_CHARS = set('\\/:*?"<>|')
+
+
+def _is_unsafe_identifier(value: str) -> bool:
+    """
+    路径分隔符 / `..` 穿越片段 / 控制字符 / 首尾空白 一律视为非法标识。
+
+    多层防御的第一层：`thread_id` 与文件名共用同一判据，使后续路径拼接无法越出会话目录。
+    """
+    if not value or value != value.strip():
+        return True
+    if ".." in value:
+        return True
+    return any(ch in _UNSAFE_NAME_CHARS or ord(ch) < 32 for ch in value)
+
+
+@app.delete("/api/upload")
+async def delete_uploaded_file(thread_id: str, name: str):
+    """
+    移除当前会话的一个已上传附件（物理删除）。
+    """
+    if _is_unsafe_identifier(thread_id):
+        raise HTTPException(status_code=400, detail="非法会话标识")
+
+    safe_name = Path(name).name
+    if _is_unsafe_identifier(name) or safe_name != name:
+        raise HTTPException(status_code=400, detail=f"非法文件名：{name}")
+
+    session_root = updated_dir.resolve()
+    session_dir = (updated_dir / f"session_{thread_id}").resolve()
+    if session_dir.parent != session_root:
+        raise HTTPException(status_code=400, detail="拒绝访问：会话目录非法")
+
+    target = (session_dir / safe_name).resolve()
+    if not target.is_relative_to(session_dir):
+        raise HTTPException(status_code=400, detail="拒绝访问：只能移除本会话上传的附件")
+
+    if not target.is_file():
+        return {
+            "status": "deleted",
+            "name": safe_name,
+            "removed": False,
+            "message": "文件不存在，已视为移除",
+        }
+
+    target.unlink()
+    logger.info(f"[upload] 已移除会话附件：thread_id={thread_id}，name={safe_name}")
+    return {"status": "deleted", "name": safe_name, "removed": True, "message": "已移除"}
+
+
 @app.get("/api/download")
 async def download_file(path: str):
     """
