@@ -16,7 +16,7 @@ import {
 } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
-import { MarkdownRenderer } from "./MarkdownRenderer";
+import { KnowledgeImage, MarkdownRenderer } from "./MarkdownRenderer";
 import type { MonitorMessage, OutputFile, SubAgentNotice } from "../types";
 
 export interface ChatTurn {
@@ -24,6 +24,8 @@ export interface ChatTurn {
   content: string;
   events: MonitorMessage[];
   files: OutputFile[];
+  /** 本轮知识库命中配图（来自检索链路的 rag_final 事件） */
+  imageUrls: string[];
   isRunning: boolean;
   notices: SubAgentNotice[];
   result: string;
@@ -460,6 +462,27 @@ function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
       {rows.map((row, rowIndex) => (
         <TraceRowItem key={row.key} row={row} showTs={rowIndex > 0} />
       ))}
+
+      {turn.imageUrls.length > 0 ? (
+        <div className="agent-row" data-channel="hint">
+          <div className="agent-row-rail">
+            <span className="agent-node">·</span>
+          </div>
+          <div className="agent-row-content">
+            <div className="agent-meta-line">
+              <span className="agent-channel">images</span>
+              <span className="agent-status-idle">
+                知识库命中配图 {turn.imageUrls.length} 张
+              </span>
+            </div>
+            <div className="agent-image-strip" aria-label="知识库命中配图">
+              {turn.imageUrls.map((url) => (
+                <KnowledgeImage alt="知识库命中配图" key={url} src={url} thumb />
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {turn.notices.length > 0 || turn.files.length > 0 ? (
         <div className="agent-row" data-channel="hint">

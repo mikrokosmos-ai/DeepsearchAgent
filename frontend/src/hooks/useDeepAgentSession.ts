@@ -13,6 +13,7 @@ import type {
   ConnectionState,
   MonitorMessage,
   OutputFile,
+  RagFinalPayload,
   SocketMessage,
   SubAgentNotice,
   UploadedItem
@@ -20,6 +21,48 @@ import type {
 
 const MAX_EVENTS = 120;
 const MAX_NOTICES = 12;
+/** 单轮最多展示的知识库配图数：一次检索可能命中很多图，超量会把轮次撑爆 */
+export const MAX_TURN_IMAGES = 12;
+
+
+function normalizeUrl(url: string): string {
+  return url.replace(/\s+/g, "").toLowerCase();
+}
+
+/** 从 `rag_final` 事件负载里取出本轮图片地址（非字符串项一律丢弃） */
+export function readImageUrlsFromEvent(
+  data: RagFinalPayload | Record<string, unknown>
+): string[] {
+  const raw = (data as RagFinalPayload).image_urls;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim());
+}
+
+/** 合并本轮图片：按「忽略空白与大小写」去重，并截断到上限 */
+export function mergeImageUrls(
+  existing: string[],
+  incoming: string[],
+  cap: number = MAX_TURN_IMAGES
+): string[] {
+  const seen = new Set(existing.map(normalizeUrl));
+  const merged = [...existing];
+  for (const url of incoming) {
+    const key = normalizeUrl(url);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(url);
+    if (merged.length >= cap) {
+      break;
+    }
+  }
+  return merged.slice(0, cap);
+}
 
 function extractString(data: Record<string, unknown>, key: string): string | null {
   const value = data[key];
@@ -62,6 +105,8 @@ export function useDeepAgentSession() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadedItems, setUploadedItems] = useState<UploadedItem[]>([]);
+  /** 本轮知识库命中配图：跨多次检索累加去重，下一次提问时清空 */
+  const [imageUrls, setImageUrls] = useState<string[]>([]);
   // 供回调读取最新清单：回调不依赖 uploadedItems，避免每次上传都重建
   const uploadedItemsRef = useRef<UploadedItem[]>([]);
   uploadedItemsRef.current = uploadedItems;
@@ -107,6 +152,7 @@ export function useDeepAgentSession() {
     setResult("");
     setNotices([]);
     setLastError("");
+    setImageUrls([]);
     clearUploadedAttachments();
     setIsRunning(false);
     setIsCancelling(false);
@@ -199,6 +245,14 @@ export function useDeepAgentSession() {
             }
           }
 
+          // 检索链路完成事件带本轮命中配图；与最终答复是两条事件，需单独收集
+          if (payload.event === "rag_final") {
+            const urls = readImageUrlsFromEvent(payload.data);
+            if (urls.length > 0) {
+              setImageUrls((previous) => mergeImageUrls(previous, urls));
+            }
+          }
+
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
             setResult(finalResult || payload.message);
@@ -285,6 +339,7 @@ export function useDeepAgentSession() {
       setResult("");
       setNotices([]);
       setLastError("");
+      setImageUrls([]);
       try {
         const response = await startTask(cleanQuery, threadId);
         if (response.thread_id && response.thread_id !== threadId) {
@@ -381,6 +436,7 @@ export function useDeepAgentSession() {
     connectionState,
     events,
     files,
+    imageUrls,
     isCancelling,
     isRunning,
     isUploading,

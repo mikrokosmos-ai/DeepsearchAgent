@@ -82,6 +82,7 @@ function createTurn(content: string): ChatTurn {
     content,
     events: [],
     files: [],
+    imageUrls: [],
     isRunning: true,
     notices: [],
     result: "",
@@ -120,6 +121,7 @@ export default function App() {
         ...latestTurn,
         events: session.events,
         files: session.files,
+        imageUrls: session.imageUrls,
         isRunning: session.isRunning,
         notices: session.notices,
         result: session.result
@@ -127,7 +129,14 @@ export default function App() {
 
       return [...previous.slice(0, -1), nextLatestTurn];
     });
-  }, [session.events, session.files, session.isRunning, session.notices, session.result]);
+  }, [
+    session.events,
+    session.files,
+    session.imageUrls,
+    session.isRunning,
+    session.notices,
+    session.result
+  ]);
 
   useEffect(() => {
     const streamNode = streamRef.current;

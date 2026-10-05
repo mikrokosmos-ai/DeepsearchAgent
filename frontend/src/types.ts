@@ -95,6 +95,13 @@ export interface SubAgentNotice {
   sources: number;
 }
 
+/** 检索链路完成事件（`rag_final`）的负载：本轮只消费其中的图片地址 */
+export interface RagFinalPayload {
+  status?: string;
+  image_urls?: string[];
+  answer_length?: number;
+}
+
 /* ========================= 知识库导入（/api/kb/*）========================= */
 
 /** 后端受理导入后返回的单条任务摘要 */
