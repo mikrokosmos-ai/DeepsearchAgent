@@ -142,7 +142,7 @@ async def run_deep_agent(task_query, session_id):
     outcome = "unknown"
 
     # 每个会话独立使用 output/sessions/session_{session_id}，避免不同用户的产物互相覆盖。
-    # resolve_session_dir() 内含旧路径只读兼容（旧的 output/session_* 仍可继续用），见 runtime_paths.py
+    # resolve_session_dir() 内含旧路径只读兼容
     session_dir = resolve_session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -206,7 +206,7 @@ async def run_deep_agent(task_query, session_id):
             monitor.report_task_cancelled()
             return
 
-        # P1-6：把用户提问落库，使刷新/断线后仍能看到完整问答（写入失败不影响任务）
+        # 把用户提问落库，使刷新/断线后仍能看到完整问答（写入失败不影响任务）
         save_agent_message(session_id, "user", task_query)
 
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
