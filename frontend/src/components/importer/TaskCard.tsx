@@ -26,6 +26,13 @@ const PROGRESS_STATUS: Record<KbTaskPhase, "active" | "success" | "exception"> =
   failed: "exception"
 };
 
+const DOT_CLASS: Record<KbTaskPhase, string> = {
+  uploading: "admin-dot--running",
+  processing: "admin-dot--running",
+  completed: "admin-dot--ok",
+  failed: "admin-dot--failed"
+};
+
 interface TaskCardProps {
   task: KbImportTaskItem;
   onRemove: (fileId: string) => void;
@@ -37,16 +44,19 @@ export function TaskCard({ task, onRemove, onCancel }: TaskCardProps) {
   const canCancel = task.phase === "processing" && Boolean(task.task_id);
 
   return (
-    <article className={`console-panel task-card task-card--${task.phase}`}>
-      <header className="task-card-head">
-        <div className="task-card-title">
+    <article
+      className={task.phase === "failed" ? "admin-task admin-task--failed" : "admin-task"}
+    >
+      <header className="admin-task-head">
+        <div className="admin-task-title">
           <FileTextOutlined aria-hidden />
           <strong>{task.file_name}</strong>
-          <span className="task-card-size">{formatFileSize(task.file_size)}</span>
+          <span className="admin-task-size">{formatFileSize(task.file_size)}</span>
         </div>
 
-        <div className="task-card-actions">
-          <span className={`task-badge task-badge--${task.phase}`}>
+        <div className="admin-task-actions">
+          <span className="admin-status-cell" style={{ marginRight: 6 }}>
+            <span className={`admin-dot ${DOT_CLASS[task.phase]}`} aria-hidden />
             {PHASE_LABEL[task.phase]}
           </span>
           {canCancel ? (
@@ -78,7 +88,7 @@ export function TaskCard({ task, onRemove, onCancel }: TaskCardProps) {
       />
 
       {task.error ? (
-        <Alert className="task-card-error" message={task.error} showIcon type="error" />
+        <Alert className="admin-task-error" message={task.error} showIcon type="error" />
       ) : null}
 
       <ImportStepRail doneList={task.done_list} runningList={task.running_list} />

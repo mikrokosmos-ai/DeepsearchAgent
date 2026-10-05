@@ -3,8 +3,16 @@
  *
  * 上传 PDF / Markdown → 观察 10 个入库节点的实时进度 → 完成后可切到对话页提问。
  * 进度既可通过 `useKbImport` 轮询获得，也会收到 WebSocket 的 `kb_progress` 事件。
+ *
+ * 版式走 Ragent 管理侧语言：admin-page-header + admin-stat-grid + 任务卡列表。
  */
-import { ReloadOutlined } from "@ant-design/icons";
+import {
+  BarChartOutlined,
+  FolderOpenOutlined,
+  ReloadOutlined,
+  SyncOutlined,
+  WarningOutlined
+} from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Empty } from "antd";
 
 import { useKbImport } from "../../hooks/useKbImport";
@@ -49,60 +57,88 @@ export function ImportPage({ threadId }: ImportPageProps) {
   }
 
   return (
-    <div className="import-page">
-      <header className="import-page-head">
+    <div className="admin-page">
+      <header className="admin-page-header">
         <div>
-          <span className="panel-kicker">KNOWLEDGE INGESTION</span>
-          <h2>知识导入</h2>
-          <p>MinerU 解析 · BGE-M3 向量化 · Milvus 入库 · Neo4j 知识图谱</p>
+          <h2 className="admin-page-title">知识导入</h2>
+          <p className="admin-page-subtitle">
+            MinerU 解析 · BGE-M3 向量化 · Milvus 入库 · Neo4j 知识图谱
+          </p>
         </div>
-        <Button icon={<ReloadOutlined />} onClick={handleRefresh}>
-          刷新
-        </Button>
+        <div className="admin-page-actions">
+          <Button className="admin-primary-gradient" icon={<SyncOutlined />} onClick={handleRefresh}>
+            刷新进度
+          </Button>
+        </div>
       </header>
 
-      {lastError ? (
-        <Alert className="chat-alert" message={lastError} showIcon type="error" />
-      ) : null}
+      {lastError ? <Alert message={lastError} showIcon type="error" /> : null}
 
-      <UploadDropzone disabled={isUploading} onFiles={handleFiles} />
-
-      <div className="import-summary" aria-label="导入任务统计">
-        <div className="import-stat">
-          <span>任务总数</span>
-          <strong>{tasks.length}</strong>
+      <div className="admin-stat-grid" aria-label="导入任务统计">
+        <div className="admin-stat-card">
+          <div className="admin-stat-value-wrap">
+            <div className="admin-stat-label">任务总数</div>
+            <div className="admin-stat-value">{tasks.length}</div>
+          </div>
+          <span className="admin-stat-icon" aria-hidden="true">
+            <BarChartOutlined />
+          </span>
         </div>
-        <div className="import-stat">
-          <span>进行中</span>
-          <strong>{runningCount}</strong>
+        <div className="admin-stat-card">
+          <div className="admin-stat-value-wrap">
+            <div className="admin-stat-label">进行中</div>
+            <div className="admin-stat-value">{runningCount}</div>
+          </div>
+          <span className="admin-stat-icon" aria-hidden="true">
+            <ReloadOutlined />
+          </span>
         </div>
-        <div className="import-stat">
-          <span>已完成</span>
-          <strong>{completedCount}</strong>
+        <div className="admin-stat-card">
+          <div className="admin-stat-value-wrap">
+            <div className="admin-stat-label">已完成</div>
+            <div className="admin-stat-value">{completedCount}</div>
+          </div>
+          <span className="admin-stat-icon admin-stat-icon--ok" aria-hidden="true">
+            <FolderOpenOutlined />
+          </span>
         </div>
-        <div className={failedCount > 0 ? "import-stat import-stat--error" : "import-stat"}>
-          <span>失败</span>
-          <strong>{failedCount}</strong>
+        <div className="admin-stat-card">
+          <div className="admin-stat-value-wrap">
+            <div className="admin-stat-label">失败</div>
+            <div className="admin-stat-value">{failedCount}</div>
+          </div>
+          <span className="admin-stat-icon admin-stat-icon--error" aria-hidden="true">
+            <WarningOutlined />
+          </span>
         </div>
       </div>
 
-      {tasks.length === 0 ? (
-        <Empty
-          className="import-empty"
-          description="暂无导入任务，上传 PDF / Markdown 即可开始"
-        />
-      ) : (
-        <div className="import-task-list">
-          {tasks.map((task) => (
-            <TaskCard
-              key={task.fileId}
-              onCancel={handleCancel}
-              onRemove={removeTask}
-              task={task}
-            />
-          ))}
+      <UploadDropzone disabled={isUploading} onFiles={handleFiles} />
+
+      <div className="ui-card">
+        <div className="admin-table-head">
+          <div>
+            <h3 className="ui-card-title">导入任务</h3>
+            <p className="ui-card-description">上传后可见 10 个入库节点的实时进度</p>
+          </div>
         </div>
-      )}
+        <div className="ui-card-body" style={{ paddingTop: 0 }}>
+          {tasks.length === 0 ? (
+            <Empty description="暂无导入任务，上传 PDF / Markdown 即可开始" />
+          ) : (
+            <div className="admin-task-list">
+              {tasks.map((task) => (
+                <TaskCard
+                  key={task.fileId}
+                  onCancel={handleCancel}
+                  onRemove={removeTask}
+                  task={task}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

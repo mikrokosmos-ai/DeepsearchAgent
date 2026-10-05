@@ -3,15 +3,19 @@ import {
   AppstoreOutlined,
   BranchesOutlined,
   CheckCircleOutlined,
-  CloseCircleOutlined,
   CloudServerOutlined,
+  CloseCircleOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
   MessageOutlined,
+  MoreOutlined,
+  PlusOutlined,
+  SearchOutlined,
   ToolOutlined
 } from "@ant-design/icons";
-import { Alert, App as AntApp, Button } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { Alert, App as AntApp } from "antd";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AgentWelcome } from "./components/AgentWelcome";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
@@ -24,6 +28,23 @@ import type { ConnectionState, UploadedItem } from "./types";
 /** 顶层视图：对话研搜 / 知识导入 / 知识库管理 */
 type AppView = "chat" | "import" | "kb";
 
+const VIEWS: { key: AppView; label: string; icon: React.ReactNode }[] = [
+  { key: "chat", label: "深度研搜", icon: <MessageOutlined /> },
+  { key: "import", label: "知识导入", icon: <AppstoreOutlined /> },
+  { key: "kb", label: "知识库管理", icon: <DatabaseOutlined /> }
+];
+
+/** 连接态 → 顶栏徽标态（Ragent 的 online / probing / offline 三态） */
+function badgeStatus(state: ConnectionState): "online" | "probing" | "offline" {
+  if (state === "connected") {
+    return "online";
+  }
+  if (state === "connecting" || state === "reconnecting") {
+    return "probing";
+  }
+  return "offline";
+}
+
 function connectionLabel(state: ConnectionState): string {
   const labels: Record<ConnectionState, string> = {
     connecting: "连接中",
@@ -32,6 +53,27 @@ function connectionLabel(state: ConnectionState): string {
     closed: "已关闭"
   };
   return labels[state];
+}
+
+/** 会话标题：取首个提问的前 18 字，空会话给占位名 */
+function turnTitle(turn: ChatTurn): string {
+  const text = turn.content.trim().replace(/\s+/g, " ");
+  if (!text) {
+    return "新会话";
+  }
+  return text.length > 18 ? `${text.slice(0, 18)}…` : text;
+}
+
+function formatClock(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function createTurn(content: string): ChatTurn {
@@ -53,7 +95,9 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const streamRef = useRef<HTMLElement | null>(null);
+  const [sessionFilter, setSessionFilter] = useState("");
+  const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
+  const streamRef = useRef<HTMLDivElement | null>(null);
   const session = useDeepAgentSession();
 
   useEffect(() => {
@@ -123,7 +167,9 @@ export default function App() {
   async function handleCancel() {
     try {
       const response = await session.cancelCurrentTask();
-      message.info(response.status === "cancelling" ? "取消请求已发送，正在等待当前调用结束" : "任务已取消");
+      message.info(
+        response.status === "cancelling" ? "取消请求已发送，正在等待当前调用结束" : "任务已取消"
+      );
     } catch (error) {
       message.error(error instanceof Error ? error.message : "取消任务失败");
     }
@@ -144,160 +190,230 @@ export default function App() {
     setTurns([]);
     setQuery("");
     setStagedItems([]);
+    setPickedTurnId(null);
+    setView("chat");
   }
 
+  /** 会话分组：照 Ragent 的 今天 / 更早 两桶（本项目只有内存态会话，不落库按天分） */
+  const sessionGroups = useMemo(() => {
+    const keyword = sessionFilter.trim().toLowerCase();
+    const matched = keyword
+      ? turns.filter((turn) => turnTitle(turn).toLowerCase().includes(keyword))
+      : turns;
+    return matched.slice().reverse();
+  }, [sessionFilter, turns]);
+
   const online = session.connectionState === "connected";
+  const status = badgeStatus(session.connectionState);
+
+  // 两种布局共用同一条输入条：空态居中、有会话时落底
+  const composer = (
+    <ChatComposer
+      isCancelling={session.isCancelling}
+      isRunning={session.isRunning}
+      isUploading={session.isUploading}
+      onCancel={handleCancel}
+      onNewSession={handleNewSession}
+      onQueryChange={setQuery}
+      onStagedItemsChange={setStagedItems}
+      onSubmit={handleSubmit}
+      onUpload={handleUpload}
+      query={query}
+      stagedItems={stagedItems}
+      uploadedItems={session.uploadedItems}
+    />
+  );
 
   return (
-    <div className="chat-app-shell min-h-dvh">
-      <aside className="chat-sidebar" aria-label="会话信息">
-        <div className="sidebar-brand">
-          <span className="panel-kicker">DEEPSEARCH</span>
-          <h1>深度研搜</h1>
-          <p>对话式多智能体研究台</p>
+    <div className="agent-app">
+      <header className="agent-header">
+        <div className="agent-brand">
+          <span className="agent-wordmark">DEEPSEARCH</span>
+          <span className="agent-brand-sep">/</span>
+          <span className="agent-brand-tag">多智能体研究台</span>
         </div>
 
-        <nav className="sidebar-nav" aria-label="功能导航">
-          <button
-            className={view === "chat" ? "sidebar-nav-item sidebar-nav-item--active" : "sidebar-nav-item"}
-            onClick={() => setView("chat")}
-            type="button"
-          >
-            <MessageOutlined aria-hidden />
-            <span>深度研搜</span>
-          </button>
-          <button
-            className={view === "import" ? "sidebar-nav-item sidebar-nav-item--active" : "sidebar-nav-item"}
-            onClick={() => setView("import")}
-            type="button"
-          >
-            <AppstoreOutlined aria-hidden />
-            <span>知识导入</span>
-          </button>
-          <button
-            className={view === "kb" ? "sidebar-nav-item sidebar-nav-item--active" : "sidebar-nav-item"}
-            onClick={() => setView("kb")}
-            type="button"
-          >
-            <DatabaseOutlined aria-hidden />
-            <span>知识库管理</span>
-          </button>
-        </nav>
-
-        <Button className="new-chat-button" block onClick={handleNewSession}>
-          新建研搜
-        </Button>
-
-        <div className="sidebar-section">
-          <span className="sidebar-label">THREAD</span>
-          <strong className="thread-id" title={session.threadId}>
-            {session.threadId.slice(0, 8)}
-          </strong>
+        <div className="agent-header-center">
+          <span className="agent-badge">
+            <span className="agent-dot" data-status={status} aria-hidden="true" />
+            <span className="agent-badge-name">{connectionLabel(session.connectionState)}</span>
+          </span>
+          <span className="agent-badge-model" title={session.threadId}>
+            thread {session.threadId.slice(0, 8)}
+          </span>
         </div>
 
-        <div className="sidebar-status-list">
-          <div className={`sidebar-status ${online ? "sidebar-status--online" : "sidebar-status--warn"}`}>
-            <ApiOutlined aria-hidden />
-            <span>WebSocket</span>
-            <strong>{connectionLabel(session.connectionState)}</strong>
+        <div className="agent-header-right">
+          <span className="agent-head-btn" data-on={session.isRunning} aria-live="polite">
+            <span className="agent-btn-glyph">{session.isRunning ? "●" : "○"}</span>
+            {session.isRunning ? "研搜中" : "待命"}
+          </span>
+        </div>
+      </header>
+
+      <div className="agent-body">
+        <aside className="agent-rail" aria-label="会话信息">
+          <div className="agent-quick">
+            <button className="agent-new-btn" onClick={handleNewSession} type="button">
+              <span className="agent-new-icon" aria-hidden="true">
+                <PlusOutlined />
+              </span>
+              <span className="agent-new-text">
+                <span className="agent-new-title">新建研搜</span>
+                <span className="agent-new-sub">从空白开始</span>
+              </span>
+            </button>
           </div>
-          <div className="sidebar-status">
-            <BranchesOutlined aria-hidden />
-            <span>助手调度</span>
-            <strong>{session.stats.assistantEvents}</strong>
-          </div>
-          <div className="sidebar-status">
-            <ToolOutlined aria-hidden />
-            <span>工具调用</span>
-            <strong>{session.stats.toolEvents}</strong>
-          </div>
-          <div className={session.stats.errorEvents > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
-            <CloseCircleOutlined aria-hidden />
-            <span>异常</span>
-            <strong>{session.stats.errorEvents}</strong>
-          </div>
-        </div>
 
-        <div className="sidebar-section">
-          <span className="sidebar-label">AGENTS</span>
-          <ul className="agent-mini-list">
-            <li>
-              <CloudServerOutlined aria-hidden />
-              网络搜索助手
-            </li>
-            <li>
-              <DatabaseOutlined aria-hidden />
-              数据库查询助手
-            </li>
-            <li>
-              <FileSearchOutlined aria-hidden />
-              本地知识库助手
-            </li>
-          </ul>
-        </div>
+          <nav className="agent-nav-card" aria-label="功能导航">
+            {VIEWS.map((item) => (
+              <button
+                className="agent-nav-item"
+                data-active={view === item.key}
+                key={item.key}
+                onClick={() => setView(item.key)}
+                type="button"
+              >
+                <span className="agent-nav-glyph" aria-hidden="true">
+                  {item.icon}
+                </span>
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </nav>
 
-        <div className="sidebar-section sidebar-endpoints">
-          <span className="sidebar-label">ENDPOINTS</span>
-          <code>{API_BASE_URL}</code>
-          <code>{WS_BASE_URL}</code>
-        </div>
-      </aside>
-
-      <main className="chat-main">
-        {view === "import" ? (
-          <section className="import-surface">
-            <ImportPage threadId={session.threadId} />
-          </section>
-        ) : view === "kb" ? (
-          <section className="import-surface">
-            <KbManagerPage />
-          </section>
-        ) : (
-          <>
-            <header className="chat-topbar">
-              <div>
-                <span className="panel-kicker">CHAT WORKSPACE</span>
-                <h2>深度研搜对话</h2>
-              </div>
-              <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
-                {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
-                {session.isRunning ? "研搜中" : "待命"}
-              </div>
-            </header>
-
-            {session.lastError ? (
-              <Alert
-                className="chat-alert"
-                message={session.lastError}
-                showIcon
-                type="error"
+          <div className="agent-search-card">
+            <div className="agent-search-head">
+              <span className="agent-search-label">搜索会话</span>
+            </div>
+            <div className="agent-search-box">
+              <SearchOutlined className="agent-search-icon" aria-hidden="true" />
+              <input
+                aria-label="搜索会话"
+                className="agent-search-input"
+                onChange={(event) => setSessionFilter(event.target.value)}
+                placeholder="搜索会话..."
+                spellCheck={false}
+                value={sessionFilter}
               />
-            ) : null}
+            </div>
+          </div>
 
-            <section className="chat-stream-panel" ref={streamRef}>
-              <ConversationThread
-                onUseExample={setQuery}
-                turns={turns}
-              />
-            </section>
+          <section className="agent-sessions">
+            <div className="agent-session-wrap">
+              <div className="agent-session-list">
+                {turns.length === 0 ? (
+                  <div className="agent-rail-empty">
+                    <MessageOutlined aria-hidden="true" />
+                    <p>暂无会话记录</p>
+                  </div>
+                ) : sessionGroups.length === 0 ? (
+                  <div className="agent-rail-empty">
+                    <SearchOutlined aria-hidden="true" />
+                    <p>无匹配会话</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="agent-session-group">最近提问</div>
+                    {sessionGroups.map((turn) => (
+                      <div
+                        className="agent-session-item"
+                        data-active={pickedTurnId === turn.id}
+                        key={turn.id}
+                      >
+                        <button
+                          className="agent-session-btn"
+                          onClick={() => {
+                            setView("chat");
+                            setPickedTurnId(turn.id);
+                            const node = document.getElementById(`turn-${turn.id}`);
+                            node?.scrollIntoView({ behavior: "smooth", block: "start" });
+                          }}
+                          title={turn.content}
+                          type="button"
+                        >
+                          <span className="agent-session-title agent-session-title--fade">
+                            {turnTitle(turn)}
+                          </span>
+                          <span className="agent-session-meta">
+                            {formatClock(turn.timestamp)}
+                          </span>
+                        </button>
+                        <span className="agent-item-btn" aria-hidden="true">
+                          <MoreOutlined />
+                        </span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+              <span className="agent-session-fade" aria-hidden="true" />
+            </div>
+          </section>
 
-            <ChatComposer
-              isCancelling={session.isCancelling}
-              isRunning={session.isRunning}
-              isUploading={session.isUploading}
-              onCancel={handleCancel}
-              onNewSession={handleNewSession}
-              onQueryChange={setQuery}
-              onStagedItemsChange={setStagedItems}
-              onSubmit={handleSubmit}
-              onUpload={handleUpload}
-              query={query}
-              stagedItems={stagedItems}
-              uploadedItems={session.uploadedItems}
-            />
-          </>
-        )}
-      </main>
+          <div className="agent-rail-stats" aria-label="运行统计">
+            <div className="agent-rail-stat">
+              <span>助手调度</span>
+              <strong>{session.stats.assistantEvents}</strong>
+            </div>
+            <div className="agent-rail-stat">
+              <span>工具调用</span>
+              <strong>{session.stats.toolEvents}</strong>
+            </div>
+            <div className="agent-rail-stat">
+              <span>输出文件</span>
+              <strong>{session.stats.fileCount}</strong>
+            </div>
+            <div className="agent-rail-stat">
+              <span>异常</span>
+              <strong>{session.stats.errorEvents}</strong>
+            </div>
+          </div>
+
+          <div className="agent-railbase">
+            <div className="agent-account">
+              <span className="agent-avatar" aria-hidden="true">
+                {online ? "WB" : "—"}
+              </span>
+              <span className="agent-account-name">深度研搜工作台</span>
+              <span className="agent-account-role">{online ? "在线" : "离线"}</span>
+            </div>
+          </div>
+        </aside>
+
+        <main
+          className="agent-main"
+          data-empty={view === "chat" && turns.length === 0 ? "true" : undefined}
+        >
+          {view === "import" || view === "kb" ? (
+            <div className="admin-layout" style={{ height: "100%", overflowY: "auto" }}>
+              <div className="admin-content">
+                {view === "import" ? (
+                  <ImportPage threadId={session.threadId} />
+                ) : (
+                  <KbManagerPage />
+                )}
+              </div>
+            </div>
+          ) : turns.length === 0 ? (
+            <AgentWelcome composer={composer} onUseCase={setQuery} />
+          ) : (
+            <>
+              {session.lastError ? (
+                <div style={{ padding: "12px 32px 0" }}>
+                  <Alert message={session.lastError} showIcon type="error" />
+                </div>
+              ) : null}
+
+              <div className="agent-stream" ref={streamRef}>
+                <ConversationThread turns={turns} />
+              </div>
+
+              {composer}
+            </>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

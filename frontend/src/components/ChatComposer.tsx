@@ -1,11 +1,13 @@
 import {
+  ArrowUpOutlined,
+  LoadingOutlined,
   PaperClipOutlined,
   PlusOutlined,
-  SendOutlined,
   StopOutlined
 } from "@ant-design/icons";
-import { Button, Tooltip, Upload } from "antd";
+import { Upload } from "antd";
 import type { UploadFile } from "antd";
+import { useEffect, useRef, useState } from "react";
 import type { UploadedItem } from "../types";
 
 interface ChatComposerProps {
@@ -61,14 +63,36 @@ export function ChatComposer({
   stagedItems,
   uploadedItems
 }: ChatComposerProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const isComposingRef = useRef(false);
+  const [value, setValue] = useState(query);
   const hasStagedFiles = stagedItems.length > 0;
-  const canSubmit = query.trim().length > 0;
+  const canSubmit = value.trim().length > 0;
+
+  // 外部（示例问句）写入 → 同步进框并聚焦
+  useEffect(() => {
+    setValue((previous) => (previous === query ? previous : query));
+    if (query) {
+      const node = textareaRef.current;
+      if (node) {
+        node.focus({ preventScroll: true });
+      }
+    }
+  }, [query]);
+
+  /** 随内容长高：上限 160px 与 CSS 的 max-height 一致 */
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!node) {
+      return;
+    }
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
+  }, [value]);
 
   function handleAttachmentChange(fileList: UploadFile[]) {
     const nextItems = uniqueUploadedItems(
-      fileList
-        .map(toUploadedItem)
-        .filter((item): item is UploadedItem => Boolean(item))
+      fileList.map(toUploadedItem).filter((item): item is UploadedItem => Boolean(item))
     );
 
     if (nextItems.length === 0) {
@@ -81,92 +105,137 @@ export function ChatComposer({
     });
   }
 
+  function submit() {
+    if (!canSubmit || isRunning) {
+      return;
+    }
+    onSubmit();
+    setValue("");
+  }
+
   return (
-    <section className="chat-composer" aria-label="发送研搜任务">
-      {uploadedItems.length > 0 ? (
-        <div className="attachment-strip" aria-label="当前会话附件">
+    <div className="agent-composer">
+      {uploadedItems.length > 0 || hasStagedFiles ? (
+        <div className="agent-composer-files" aria-label="当前会话附件">
           {uploadedItems.map((item) => (
-            <span className="attachment-pill" key={`${item.uid}-${item.name}`}>
+            <span className="agent-file-pill" key={`u-${item.uid}-${item.name}`}>
               <PaperClipOutlined aria-hidden />
-              {item.name}
+              <span>{item.name}</span>
             </span>
           ))}
-        </div>
-      ) : null}
-
-      {hasStagedFiles ? (
-        <div className="attachment-strip" aria-label="待上传附件">
           {stagedItems.map((item) => (
-            <span className="attachment-pill attachment-pill--pending" key={item.uid}>
+            <span
+              className="agent-file-pill agent-file-pill--pending"
+              key={`s-${item.uid}`}
+            >
               <PaperClipOutlined aria-hidden />
-              {item.name}
+              <span>{item.name}</span>
             </span>
           ))}
-          {isUploading ? <span className="attachment-uploading">附着中...</span> : null}
+          {isUploading ? (
+            <span className="agent-file-pill agent-file-pill--pending">附着中…</span>
+          ) : null}
         </div>
       ) : null}
 
-      <div className="composer-shell">
+      <div className="agent-composer-box">
         <textarea
           aria-label="研搜任务"
-          disabled={isRunning}
-          onChange={(event) => onQueryChange(event.target.value)}
+          className="agent-composer-input"
+          onChange={(event) => {
+            setValue(event.target.value);
+            onQueryChange(event.target.value);
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+          }}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              onSubmit();
+            if (event.key !== "Enter" || event.shiftKey) {
+              return;
             }
+            const nativeEvent = event.nativeEvent as KeyboardEvent;
+            if (
+              nativeEvent.isComposing ||
+              isComposingRef.current ||
+              nativeEvent.keyCode === 229
+            ) {
+              return;
+            }
+            event.preventDefault();
+            submit();
           }}
           placeholder="向 DeepSearch Agents 发送任务..."
-          value={query}
+          ref={textareaRef}
+          rows={1}
+          value={value}
         />
 
-        <div className="composer-toolbar">
-          <div className="composer-left-actions">
-            <Tooltip title="新建会话">
-              <Button
-                aria-label="新建会话"
-                className="composer-icon-button"
-                icon={<PlusOutlined />}
-                onClick={onNewSession}
-                shape="circle"
-              />
-            </Tooltip>
-            <Upload
-              beforeUpload={() => false}
-              fileList={[]}
-              multiple
-              onChange={(info) => {
-                handleAttachmentChange(info.fileList.length > 0 ? info.fileList : [info.file]);
-              }}
-              showUploadList={false}
+        <div className="agent-composer-tools">
+          <button
+            aria-label="新建会话"
+            className="agent-composer-tool"
+            onClick={onNewSession}
+            title="新建会话"
+            type="button"
+          >
+            <PlusOutlined />
+          </button>
+          <Upload
+            beforeUpload={() => false}
+            fileList={[]}
+            multiple
+            onChange={(info) => {
+              handleAttachmentChange(info.fileList.length > 0 ? info.fileList : [info.file]);
+            }}
+            showUploadList={false}
+          >
+            <button
+              aria-label="选择附件"
+              className="agent-composer-tool"
+              disabled={isUploading}
+              title="选择附件"
+              type="button"
             >
-              <Tooltip title="选择附件">
-                <Button
-                  aria-label="选择附件"
-                  className="composer-icon-button"
-                  disabled={isRunning || isUploading}
-                  icon={<PaperClipOutlined />}
-                  shape="circle"
-                />
-              </Tooltip>
-            </Upload>
-          </div>
-
-          <Tooltip title={isRunning ? "取消当前任务" : "发送任务"}>
-            <Button
-              aria-label={isRunning ? "取消当前任务" : "发送任务"}
-              className={isRunning ? "send-button send-button--cancel" : "send-button"}
-              disabled={isRunning ? isCancelling : !canSubmit}
-              icon={isRunning ? <StopOutlined /> : <SendOutlined />}
-              loading={isCancelling}
-              onClick={isRunning ? onCancel : onSubmit}
-              shape="circle"
-              type="primary"
-            />
-          </Tooltip>
+              <PaperClipOutlined />
+            </button>
+          </Upload>
         </div>
+
+        {isRunning ? (
+          <button
+            aria-busy={isCancelling}
+            aria-label={isCancelling ? "正在停止" : "停止生成"}
+            className="agent-composer-btn"
+            data-stop="true"
+            data-stopping={isCancelling ? "true" : undefined}
+            disabled={isCancelling}
+            onClick={onCancel}
+            title={isCancelling ? "正在停止…" : "停止生成"}
+            type="button"
+          >
+            {isCancelling ? <LoadingOutlined /> : <StopOutlined />}
+          </button>
+        ) : (
+          <button
+            aria-label="发送"
+            className="agent-composer-btn"
+            disabled={!canSubmit}
+            onClick={submit}
+            title="发送（Enter）"
+            type="button"
+          >
+            <ArrowUpOutlined />
+          </button>
+        )}
       </div>
-    </section>
+
+      {/* 免责一行在框外：框里不摆第二行是因为没有真控件 这句有真职责 */}
+      <p className="agent-composer-note" aria-live="polite">
+        {isCancelling ? "正在停止并保存已生成内容…" : "内容由 AI 生成，请仔细甄别"}
+      </p>
+    </div>
   );
 }

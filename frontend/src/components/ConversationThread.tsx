@@ -3,18 +3,17 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   CloseCircleOutlined,
-  CloudServerOutlined,
-  DatabaseOutlined,
   DownloadOutlined,
   FileMarkdownOutlined,
   FilePdfOutlined,
   FileSearchOutlined,
   FileTextOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
+  MinusCircleOutlined,
   StopOutlined,
-  ToolOutlined,
+  ToolOutlined
 } from "@ant-design/icons";
-import { Button, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -32,57 +31,52 @@ export interface ChatTurn {
 }
 
 interface ConversationThreadProps {
-  onUseExample: (prompt: string) => void;
   turns: ChatTurn[];
 }
 
-const TASK_EXAMPLES = [
-  {
-    tool: "网络搜索工具",
-    title: "联网趋势研判",
-    prompt:
-      "请使用网络搜索工具，检索 2026 年跨境电商 AI 客服趋势，列出 5 条关键变化，并附上来源链接。",
-    icon: <CloudServerOutlined aria-hidden />,
-  },
-  {
-    tool: "数据库查询工具",
-    title: "药品库存排查",
-    prompt:
-      "请请使用数据库查询工具，查询库存大于 100 的药品，按库存量升序列出药品名称、批次号、仓库位置和过期日期。",
-    icon: <DatabaseOutlined aria-hidden />,
-  },
-  {
-    tool: "内部知识库",
-    title: "内部文档问答",
-    prompt:
-      "请使用内部知识库助手，查询公司内部白皮书中关于品类策略的内容，并整理成三条可执行建议。",
-    icon: <FileSearchOutlined aria-hidden />,
-  },
-  {
-    tool: "文件读取工具",
-    title: "上传文件分析",
-    prompt:
-      "请使用文件读取工具，读取我上传的文件，提炼核心观点、风险点和待补充信息，并给出下一步分析计划。",
-    icon: <FileTextOutlined aria-hidden />,
-  },
-  {
-    tool: "Markdown/PDF 工具",
-    title: "生成交付报告",
-    prompt:
-      "请使用 Markdown 文档生成工具和 Markdown 转 PDF 工具，基于本次调研结果生成一份 Markdown 报告，并转换成 PDF 保存到当前工作目录。",
-    icon: <FileMarkdownOutlined aria-hidden />,
-  },
-];
+/**
+ * 轨迹通道：与 Ragent 的 TraceChannel 同名同义。
+ * 每个通道配一枚 mono 字形，▮ 答复节点是全流唯一的橙节点。
+ */
+type TraceChannel = "user" | "reasoning" | "tool" | "answer" | "hint" | "error";
+
+const GLYPH: Record<TraceChannel, string> = {
+  user: "▷",
+  reasoning: "○",
+  tool: "●",
+  answer: "▮",
+  hint: "·",
+  error: "✕"
+};
+
+const CHANNEL_NAME: Record<TraceChannel, string> = {
+  user: "you",
+  reasoning: "reasoning",
+  tool: "tool",
+  answer: "answer",
+  hint: "hint",
+  error: "error"
+};
+
+interface TraceRow {
+  key: string;
+  channel: TraceChannel;
+  ts: string;
+  text?: string;
+  data?: Record<string, unknown>;
+  streaming?: boolean;
+}
 
 function formatTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return "--:--";
+    return "";
   }
   return date.toLocaleTimeString("zh-CN", {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit"
   });
 }
 
@@ -101,24 +95,28 @@ function parseTime(value: string): number | null {
   return Number.isNaN(time) ? null : time;
 }
 
-function formatDuration(value: number): string {
-  const totalSeconds = Math.max(0, Math.floor(value / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const paddedMinutes = String(minutes).padStart(2, "0");
-  const paddedSeconds = String(seconds).padStart(2, "0");
-
-  if (hours > 0) {
-    return `${hours}:${paddedMinutes}:${paddedSeconds}`;
+/** 耗时刻度：1s 内按毫秒、10s 内留一位小数、1m 起转 m/s 复合 */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "";
   }
-  return `${paddedMinutes}:${paddedSeconds}`;
+  if (ms < 1) {
+    return "<1ms";
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+  if (ms < 10_000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) {
+    return `${secs}s`;
+  }
+  return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
 }
 
-function getLastEventTime(
-  events: MonitorMessage[],
-  eventName?: string,
-): number | null {
+function getLastEventTime(events: MonitorMessage[], eventName?: string): number | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (!eventName || event.event === eventName) {
@@ -128,21 +126,62 @@ function getLastEventTime(
   return null;
 }
 
-function getThinkingDuration(
-  events: MonitorMessage[],
-  fallbackStart: string,
-  isRunning: boolean,
-  now: number,
-): string {
+/** 本轮墙上时间：首事件 → task_result（或最后一个事件） */
+function turnElapsed(turn: ChatTurn, now: number): number | null {
   const startedAt =
-    (events[0] ? parseTime(events[0].timestamp) : null) ??
-    parseTime(fallbackStart) ??
-    now;
+    (turn.events[0] ? parseTime(turn.events[0].timestamp) : null) ??
+    parseTime(turn.timestamp);
+  if (startedAt == null) {
+    return null;
+  }
   const finishedAt =
-    getLastEventTime(events, "task_result") ??
-    (!isRunning ? getLastEventTime(events) : null) ??
+    getLastEventTime(turn.events, "task_result") ??
+    (!turn.isRunning ? getLastEventTime(turn.events) : null) ??
     now;
-  return formatDuration(finishedAt - startedAt);
+  return Math.max(0, finishedAt - startedAt);
+}
+
+/** 事件名 → 轨迹通道 */
+function eventChannel(event: string): TraceChannel {
+  if (event === "assistant_call") {
+    return "reasoning";
+  }
+  if (event === "tool_start") {
+    return "tool";
+  }
+  if (event === "error") {
+    return "error";
+  }
+  if (event === "task_cancelled") {
+    return "error";
+  }
+  return "hint";
+}
+
+function eventStatus(event: string): string | null {
+  if (event === "task_result") {
+    return "完成";
+  }
+  if (event === "task_cancelled") {
+    return "已停止";
+  }
+  if (event === "error") {
+    return "失败";
+  }
+  if (event === "session_created") {
+    return "已建会话";
+  }
+  return null;
+}
+
+function eventStatusClass(event: string): string {
+  if (event === "task_result") {
+    return "agent-status-ok";
+  }
+  if (event === "task_cancelled") {
+    return "agent-status-idle";
+  }
+  return "agent-status-err";
 }
 
 function EventIcon({ event }: { event: string }) {
@@ -177,121 +216,6 @@ function FileIcon({ name }: { name: string }) {
   return <FileTextOutlined aria-hidden />;
 }
 
-function ThinkingTimeline({ events }: { events: MonitorMessage[] }) {
-  const timelineRef = useRef<HTMLOListElement | null>(null);
-
-  useEffect(() => {
-    const timelineNode = timelineRef.current;
-    if (!timelineNode) {
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      timelineNode.scrollTop = timelineNode.scrollHeight;
-    });
-  }, [events.length]);
-
-  if (events.length === 0) {
-    return (
-      <div className="thinking-empty">
-        <ClockCircleOutlined aria-hidden />
-        等待后端推送执行事件
-      </div>
-    );
-  }
-
-  return (
-    <ol className="thinking-timeline" ref={timelineRef}>
-      {events.map((event, index) => (
-        <li
-          className={`thinking-event thinking-event--${event.event}`}
-          key={`${event.timestamp}-${index}`}
-        >
-          <span className="thinking-event-icon">
-            <EventIcon event={event.event} />
-          </span>
-          <div>
-            <div className="thinking-event-meta">
-              <span>{event.event}</span>
-              <time dateTime={event.timestamp}>
-                {formatTime(event.timestamp)}
-              </time>
-            </div>
-            <p>{event.message}</p>
-            {event.event === "assistant_call" ||
-            event.event === "tool_start" ? (
-              <code>{JSON.stringify(event.data)}</code>
-            ) : null}
-          </div>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function ArtifactShelf({ files }: { files: OutputFile[] }) {
-  if (files.length === 0) {
-    return (
-      <div className="artifact-empty">
-        <FileSearchOutlined aria-hidden />
-        暂无输出文件
-      </div>
-    );
-  }
-
-  return (
-    <div className="artifact-shelf">
-      {files.map((file) => (
-        <div className="artifact-card" key={file.path}>
-          <span className="artifact-icon">
-            <FileIcon name={file.name} />
-          </span>
-          <div className="artifact-copy">
-            <strong title={file.name}>{file.name}</strong>
-            <span>{formatBytes(file.size)}</span>
-          </div>
-          <Tooltip title="下载">
-            <Button
-              aria-label={`下载 ${file.name}`}
-              className="artifact-download"
-              href={getDownloadUrl(file.path)}
-              icon={<DownloadOutlined />}
-              shape="circle"
-            />
-          </Tooltip>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ThinkingLoader({ durationLabel }: { durationLabel: string }) {
-  return (
-    <div
-      className="thinking-loader"
-      aria-live="polite"
-      aria-label="正在生成回复"
-    >
-      <div className="loader-status">
-        <span className="loader-pulse" aria-hidden />
-        <strong>正在研搜</strong>
-        <span className="loader-duration">已思考 {durationLabel}</span>
-        <span className="loader-dots" aria-hidden>
-          <i />
-          <i />
-          <i />
-        </span>
-      </div>
-      <div className="loader-track" aria-hidden />
-      <ul className="loader-steps" aria-hidden>
-        <li>理解问题</li>
-        <li>调度工具</li>
-        <li>汇总答案</li>
-      </ul>
-    </div>
-  );
-}
-
 /** 提示语气：正常 / 被截断 / 链路故障 / 未解析（降级） */
 function noticeTone(notice: SubAgentNotice): string {
   if (!notice.parsed) {
@@ -319,178 +243,267 @@ function noticeText(notice: SubAgentNotice): string {
   return `返回正常（来源 ${notice.sources} 条）`;
 }
 
-function AssistantMessage({
-  events,
-  files,
-  isRunning,
-  notices,
-  result,
-  timestamp,
-}: Pick<
-  ChatTurn,
-  "events" | "files" | "isRunning" | "notices" | "result" | "timestamp"
->) {
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    if (!isRunning) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [isRunning]);
-
-  const durationLabel = getThinkingDuration(events, timestamp, isRunning, now);
-  const isCancelled = events.some((event) => event.event === "task_cancelled");
-  const syncLabel = isRunning
-    ? `生成中 · 思考 ${durationLabel}`
-    : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
+/** 工具行/思考行/答复行：一律是 40px 左轴 + 元信息行 + 正文 */
+function TraceRowItem({ row, showTs }: { row: TraceRow; showTs: boolean }) {
+  const failed = row.channel === "error";
 
   return (
-    <article className="chat-message chat-message--assistant">
-      <div className="message-avatar">AI</div>
-      <div className="message-bubble">
-        <div className="message-meta">
-          <span>DeepSearch Agents</span>
-          <time>{syncLabel}</time>
-        </div>
-
-        <details
-          className="thinking-block"
-          open={isRunning || events.length > 0}
-        >
-          <summary>
-            <span>
-              <BranchesOutlined aria-hidden />
-              深度研搜过程
-            </span>
-            <strong>{events.length}</strong>
-          </summary>
-          <ThinkingTimeline events={events} />
-        </details>
-
-        {result ? (
-          <div className="assistant-answer">
-            <MarkdownRenderer content={result} />
-          </div>
-        ) : (
-          <div className="assistant-answer assistant-answer--pending">
-            {isRunning ? (
-              <ThinkingLoader durationLabel={durationLabel} />
-            ) : (
-              "任务完成后会在这里显示最终回复。"
-            )}
-          </div>
-        )}
-
-        {notices.length > 0 ? (
-          <details className="thinking-block artifact-block" open>
-            <summary>
-              <span>
-                <InfoCircleOutlined aria-hidden />
-                信息完整性
-              </span>
-              <strong>{notices.length}</strong>
-            </summary>
-            <ul className="subagent-notice-list">
-              {notices.map((notice, index) => (
-                <li
-                  className={`subagent-notice subagent-notice--${noticeTone(notice)}`}
-                  key={`${notice.subagent}-${index}`}
-                >
-                  <strong>{notice.subagent}</strong>
-                  <span>{noticeText(notice)}</span>
-                </li>
-              ))}
-            </ul>
-          </details>
-        ) : null}
-
-        <details
-          className="thinking-block artifact-block"
-          open={files.length > 0}
-        >
-          <summary>
-            <span>
-              <FileSearchOutlined aria-hidden />
-              输出文件
-            </span>
-            <strong>{files.length}</strong>
-          </summary>
-          <ArtifactShelf files={files} />
-        </details>
+    <div
+      className="agent-row"
+      data-channel={row.channel}
+      data-failed={failed}
+      data-streaming={Boolean(row.streaming)}
+    >
+      <div className="agent-row-rail">
+        <span className="agent-node">{GLYPH[row.channel]}</span>
       </div>
-    </article>
+      <div className="agent-row-content">
+        <div className="agent-meta-line">
+          <span className="agent-channel">{CHANNEL_NAME[row.channel]}</span>
+          {row.channel === "tool" && row.text ? (
+            <span className="agent-tool-chip">{row.text}</span>
+          ) : null}
+          {row.channel === "hint" && row.text ? (
+            <span className="agent-status-idle">{row.text}</span>
+          ) : null}
+          {row.ts && showTs ? <span className="agent-row-ts">{row.ts}</span> : null}
+        </div>
+        <TraceRowBody row={row} />
+      </div>
+    </div>
   );
 }
 
-export function ConversationThread({
-  onUseExample,
-  turns,
-}: ConversationThreadProps) {
-  if (turns.length === 0) {
+function TraceRowBody({ row }: { row: TraceRow }) {
+  if (row.channel === "tool" && row.data) {
+    return <ToolBox data={row.data} />;
+  }
+  if (row.channel === "answer") {
     return (
-      <div className="conversation-empty">
-        <div className="empty-examples">
-          <div className="empty-examples-copy">
-            <span className="panel-kicker">TASK EXAMPLES</span>
-            <h3>选择一个工具任务开始</h3>
-            <p>
-              每个示例会触发不同工具路径，执行轨迹和输出文件会直接出现在对话里。
-            </p>
-          </div>
-
-          <div className="example-grid" aria-label="研搜任务示例">
-            {TASK_EXAMPLES.map((example) => (
-              <button
-                className="example-card"
-                key={example.tool}
-                onClick={() => onUseExample(example.prompt)}
-                type="button"
-              >
-                <span className="example-icon">{example.icon}</span>
-                <span className="example-copy">
-                  <span>{example.tool}</span>
-                  <strong>{example.title}</strong>
-                  <small>{example.prompt}</small>
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
+      <div className="agent-answer-form">
+        <MarkdownRenderer content={row.text ?? ""} />
       </div>
     );
   }
+  if (row.channel === "error") {
+    return <div className="agent-row-text">{row.text}</div>;
+  }
+  if (row.channel === "hint") {
+    return null;
+  }
+  return <div className="agent-row-text">{row.text}</div>;
+}
+
+/** 工具块：一行参数摘要 + 展开看完整入参 */
+function ToolBox({ data }: { data: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  const raw = JSON.stringify(data, null, 2);
 
   return (
-    <div className="conversation-thread" aria-label="聊天消息流">
-      {turns.map((turn) => (
-        <div className="conversation-turn" key={turn.id}>
-          <article className="chat-message chat-message--user">
-            <div className="message-bubble">
-              <div className="message-meta">
-                <span>你</span>
-                <time dateTime={turn.timestamp}>
-                  {formatTime(turn.timestamp)}
-                </time>
-              </div>
-              <p>{turn.content}</p>
-            </div>
-          </article>
-          <AssistantMessage
-            events={turn.events}
-            files={turn.files}
-            isRunning={turn.isRunning}
-            notices={turn.notices}
-            result={turn.result}
-            timestamp={turn.timestamp}
-          />
+    <div className="agent-toolbox">
+      <button
+        aria-expanded={open}
+        className="agent-tool-summary"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <span className="agent-caret">{open ? "▾" : "▸"}</span>
+        <span className="agent-tool-preview">{summarize(data)}</span>
+      </button>
+      {open ? <pre className="agent-pre">{raw}</pre> : null}
+    </div>
+  );
+}
+
+function summarize(data: Record<string, unknown>): string {
+  const compact = JSON.stringify(data);
+  if (!compact || compact === "{}") {
+    return "（无参数）";
+  }
+  if (compact.length <= 96) {
+    return compact;
+  }
+  const keys = Object.keys(data);
+  return `对象 · ${keys.slice(0, 4).join(", ")}${keys.length > 4 ? "…" : ""}`;
+}
+
+/** 一轮的轨迹行：user 行 + 各事件的工具/思考/错误行 + answer 行 */
+function buildTurnRows(turn: ChatTurn): TraceRow[] {
+  const rows: TraceRow[] = [];
+
+  rows.push({
+    key: `u-${turn.id}`,
+    channel: "user",
+    ts: formatTime(turn.timestamp),
+    text: turn.content
+  });
+
+  turn.events.forEach((event, index) => {
+    const channel = eventChannel(event.event);
+    const status = eventStatus(event.event);
+    rows.push({
+      key: `e-${turn.id}-${index}`,
+      channel,
+      ts: formatTime(event.timestamp),
+      text: channel === "tool" ? event.message : event.message,
+      data: channel === "tool" ? event.data : undefined,
+      streaming: turn.isRunning && index === turn.events.length - 1 && channel !== "error"
+    });
+    // 终态事件额外把状态标挂在同一行（Ragent 的做法：状态与内容同行）
+    if (status) {
+      rows[rows.length - 1].text = event.message;
+    }
+  });
+
+  if (turn.isRunning && turn.events.length === 0) {
+    rows.push({
+      key: `wait-${turn.id}`,
+      channel: "hint",
+      ts: "",
+      text: "等待响应…",
+      streaming: true
+    });
+  }
+
+  if (turn.result) {
+    rows.push({
+      key: `a-${turn.id}`,
+      channel: "answer",
+      ts: "",
+      text: turn.result
+    });
+  } else if (turn.isRunning && turn.events.length > 0) {
+    rows.push({
+      key: `a-pending-${turn.id}`,
+      channel: "hint",
+      ts: "",
+      text: "正在汇总答复…",
+      streaming: true
+    });
+  }
+
+  return rows;
+}
+
+function NoticeList({ notices }: { notices: SubAgentNotice[] }) {
+  return (
+    <ul className="agent-notice-list">
+      {notices.map((notice, index) => (
+        <li
+          className={`agent-notice agent-notice--${noticeTone(notice)}`}
+          key={`${notice.subagent}-${index}`}
+        >
+          <strong>{notice.subagent}</strong>
+          <span>{noticeText(notice)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function FileList({ files }: { files: OutputFile[] }) {
+  return (
+    <div className="agent-notice-list">
+      {files.map((file) => (
+        <div className="agent-file" key={file.path}>
+          <span className="agent-file-icon">
+            <FileIcon name={file.name} />
+          </span>
+          <span className="agent-file-copy">
+            <span className="agent-file-name" title={file.name}>
+              {file.name}
+            </span>
+            <span className="agent-file-size">{formatBytes(file.size)}</span>
+          </span>
+          <a
+            aria-label={`下载 ${file.name}`}
+            className="agent-file-dl"
+            href={getDownloadUrl(file.path)}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <DownloadOutlined />
+          </a>
         </div>
       ))}
     </div>
   );
+}
+
+/** 轮次卡：卡头 TURN N + 总耗时，卡内是轨迹行 */
+function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!turn.isRunning) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [turn.isRunning]);
+
+  const rows = buildTurnRows(turn);
+  const headTs = rows[0]?.ts ?? "";
+  const elapsedMs = turnElapsed(turn, now);
+  // 流式中不显示总耗时 收尾实测后才亮
+  const elapsed = turn.isRunning ? "" : elapsedMs != null ? formatDuration(elapsedMs) : "";
+
+  return (
+    <section className="agent-turn" id={`turn-${turn.id}`}>
+      <header className="agent-turn-head">
+        <span className="agent-turn-no">TURN {index + 1}</span>
+        <span className="agent-turn-ts">
+          {headTs}
+          {elapsed ? <span className="agent-turn-dur"> · {elapsed}</span> : null}
+        </span>
+      </header>
+      {rows.map((row, rowIndex) => (
+        <TraceRowItem key={row.key} row={row} showTs={rowIndex > 0} />
+      ))}
+
+      {turn.notices.length > 0 || turn.files.length > 0 ? (
+        <div className="agent-row" data-channel="hint">
+          <div className="agent-row-rail">
+            <span className="agent-node">·</span>
+          </div>
+          <div className="agent-row-content" style={{ paddingBottom: 8 }}>
+            <div className="agent-meta-line">
+              <span className="agent-channel">artifacts</span>
+            </div>
+            {turn.notices.length > 0 ? (
+              <div style={{ marginBottom: turn.files.length > 0 ? 8 : 0 }}>
+                <NoticeList notices={turn.notices} />
+              </div>
+            ) : null}
+            {turn.files.length > 0 ? <FileList files={turn.files} /> : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function ConversationThread({ turns }: ConversationThreadProps) {
+  return (
+    <div className="agent-stream-rows" aria-label="聊天消息流">
+      {turns.map((turn, index) => (
+        <TurnCard index={index} key={turn.id} turn={turn} />
+      ))}
+    </div>
+  );
+}
+
+/** 供外部复用的加载中字形（导入页等场景） */
+export function SpinnerGlyph() {
+  return <LoadingOutlined aria-hidden />;
+}
+
+/** 供外部复用的待执行字形 */
+export function PendingGlyph() {
+  return <MinusCircleOutlined aria-hidden />;
+}
+
+/** 供外部复用的信息提示字形 */
+export function InfoGlyph() {
+  return <InfoCircleOutlined aria-hidden />;
 }
