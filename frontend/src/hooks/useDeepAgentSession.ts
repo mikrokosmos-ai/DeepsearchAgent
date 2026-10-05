@@ -67,6 +67,24 @@ export function useDeepAgentSession() {
     }
   }, []);
 
+  /** 清空会话附件：新建会话与任务终态共用，避免上一轮附件挂在本轮下面 */
+  const clearUploadedAttachments = useCallback(() => {
+    setUploadedItems([]);
+    uploadedNameSetRef.current.clear();
+  }, []);
+
+  /** 移除一个已上传附件：仅收敛本地清单 */
+  const removeUploadedItem = useCallback((uid: string) => {
+    setUploadedItems((previous) => {
+      const target = previous.find((item) => item.uid === uid);
+      if (!target) {
+        return previous;
+      }
+      uploadedNameSetRef.current.delete(target.name);
+      return previous.filter((item) => item.uid !== uid);
+    });
+  }, []);
+
   const resetSession = useCallback(() => {
     const nextThreadId = createThreadId();
     storeThreadId(nextThreadId);
@@ -77,11 +95,10 @@ export function useDeepAgentSession() {
     setResult("");
     setNotices([]);
     setLastError("");
-    setUploadedItems([]);
-    uploadedNameSetRef.current.clear();
+    clearUploadedAttachments();
     setIsRunning(false);
     setIsCancelling(false);
-  }, []);
+  }, [clearUploadedAttachments]);
 
   const refreshFiles = useCallback(async () => {
     if (!sessionPath) {
@@ -175,18 +192,21 @@ export function useDeepAgentSession() {
             setResult(finalResult || payload.message);
             setIsRunning(false);
             setIsCancelling(false);
+            clearUploadedAttachments();
           }
 
           if (payload.event === "task_cancelled") {
             setResult((previous) => previous || payload.message);
             setIsRunning(false);
             setIsCancelling(false);
+            clearUploadedAttachments();
           }
 
           if (payload.event === "error") {
             setLastError(payload.message);
             setIsRunning(false);
             setIsCancelling(false);
+            clearUploadedAttachments();
           }
         } catch (error) {
           setLastError(error instanceof Error ? error.message : "WebSocket 消息解析失败");
@@ -220,7 +240,7 @@ export function useDeepAgentSession() {
       clearSocketTimers();
       socketRef.current?.close();
     };
-  }, [clearSocketTimers, threadId]);
+  }, [clearSocketTimers, clearUploadedAttachments, threadId]);
 
   useEffect(() => {
     if (!sessionPath) {
@@ -361,6 +381,7 @@ export function useDeepAgentSession() {
     sessionPath,
     stats,
     cancelCurrentTask,
+    removeUploadedItem,
     submitTask,
     threadId,
     uploadFiles,

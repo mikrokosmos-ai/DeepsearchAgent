@@ -1,5 +1,6 @@
 import {
   ArrowUpOutlined,
+  CloseOutlined,
   LoadingOutlined,
   PaperClipOutlined,
   PlusOutlined,
@@ -18,7 +19,10 @@ interface ChatComposerProps {
   onCancel: () => void;
   onQueryChange: (value: string) => void;
   onSubmit: () => void;
-  onUpload: (items: UploadedItem[]) => Promise<void> | void;
+  /** 取消一个还没上传的暂存项 */
+  onRemoveStaged: (uid: string) => void;
+  /** 移除一个已上传到会话的附件 */
+  onRemoveUploaded: (uid: string) => void;
   query: string;
   stagedItems: UploadedItem[];
   uploadedItems: UploadedItem[];
@@ -56,9 +60,10 @@ export function ChatComposer({
   onCancel,
   onNewSession,
   onQueryChange,
+  onRemoveStaged,
+  onRemoveUploaded,
   onStagedItemsChange,
   onSubmit,
-  onUpload,
   query,
   stagedItems,
   uploadedItems
@@ -90,23 +95,21 @@ export function ChatComposer({
     node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
   }, [value]);
 
+  /** 选中文件只进暂存区，不发起上传；真正的上传在提交任务时统一执行 */
   function handleAttachmentChange(fileList: UploadFile[]) {
-    const nextItems = uniqueUploadedItems(
-      fileList.map(toUploadedItem).filter((item): item is UploadedItem => Boolean(item))
-    );
+    const picked = fileList
+      .map(toUploadedItem)
+      .filter((item): item is UploadedItem => Boolean(item));
 
-    if (nextItems.length === 0) {
+    if (picked.length === 0) {
       return;
     }
 
-    onStagedItemsChange(nextItems);
-    void Promise.resolve(onUpload(nextItems)).finally(() => {
-      onStagedItemsChange([]);
-    });
+    onStagedItemsChange(uniqueUploadedItems([...stagedItems, ...picked]));
   }
 
   function submit() {
-    if (!canSubmit || isRunning) {
+    if (!canSubmit || isRunning || isUploading) {
       return;
     }
     onSubmit();
@@ -121,6 +124,15 @@ export function ChatComposer({
             <span className="agent-file-pill" key={`u-${item.uid}-${item.name}`}>
               <PaperClipOutlined aria-hidden />
               <span>{item.name}</span>
+              <button
+                aria-label={`移除附件 ${item.name}`}
+                className="agent-file-x"
+                onClick={() => onRemoveUploaded(item.uid)}
+                title="从会话移除"
+                type="button"
+              >
+                <CloseOutlined />
+              </button>
             </span>
           ))}
           {stagedItems.map((item) => (
@@ -130,6 +142,15 @@ export function ChatComposer({
             >
               <PaperClipOutlined aria-hidden />
               <span>{item.name}</span>
+              <button
+                aria-label={`取消上传 ${item.name}`}
+                className="agent-file-x"
+                onClick={() => onRemoveStaged(item.uid)}
+                title="取消上传"
+                type="button"
+              >
+                <CloseOutlined />
+              </button>
             </span>
           ))}
           {isUploading ? (
@@ -222,9 +243,9 @@ export function ChatComposer({
           <button
             aria-label="发送"
             className="agent-composer-btn"
-            disabled={!canSubmit}
+            disabled={!canSubmit || isUploading}
             onClick={submit}
-            title="发送（Enter）"
+            title={isUploading ? "附件上传中…" : "发送（Enter）"}
             type="button"
           >
             <ArrowUpOutlined />
@@ -234,7 +255,11 @@ export function ChatComposer({
 
       {/* 免责一行在框外：框里不摆第二行是因为没有真控件 这句有真职责 */}
       <p className="agent-composer-note" aria-live="polite">
-        {isCancelling ? "正在停止并保存已生成内容…" : "内容由 AI 生成，请仔细甄别"}
+        {isCancelling
+          ? "正在停止并保存已生成内容…"
+          : hasStagedFiles
+            ? `待上传 ${stagedItems.length} 个附件，发送时一并上传`
+            : "内容由 AI 生成，请仔细甄别"}
       </p>
     </div>
   );

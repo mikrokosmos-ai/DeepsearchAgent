@@ -98,7 +98,16 @@ export default function App() {
   const [sessionFilter, setSessionFilter] = useState("");
   const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const wasRunningRef = useRef(false);
   const session = useDeepAgentSession();
+
+  // 任务进入终态（成功 / 已停止 / 失败）即清空暂存附件，避免跨轮残留
+  useEffect(() => {
+    if (wasRunningRef.current && !session.isRunning) {
+      setStagedItems([]);
+    }
+    wasRunningRef.current = session.isRunning;
+  }, [session.isRunning]);
 
   useEffect(() => {
     setTurns((previous) => {
@@ -141,6 +150,18 @@ export default function App() {
       return;
     }
 
+    // 暂存附件在这里才真正上传；上传失败即中止本轮，不让任务在缺附件的情况下跑
+    if (stagedItems.length > 0) {
+      try {
+        await session.uploadFiles(stagedItems);
+        setStagedItems([]);
+        message.success(`已附带 ${stagedItems.length} 个文件`);
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "附件上传失败，任务未启动");
+        return;
+      }
+    }
+
     const nextTurn = createTurn(cleanQuery);
     setTurns((previous) => [...previous, nextTurn]);
     setQuery("");
@@ -175,14 +196,12 @@ export default function App() {
     }
   }
 
-  async function handleUpload(items: UploadedItem[]) {
-    try {
-      const response = await session.uploadFiles(items);
-      setStagedItems([]);
-      message.success(`已上传 ${response.files.length} 个文件`);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "上传失败");
-    }
+  function handleRemoveStaged(uid: string) {
+    setStagedItems((previous) => previous.filter((item) => item.uid !== uid));
+  }
+
+  function handleRemoveUploaded(uid: string) {
+    session.removeUploadedItem(uid);
   }
 
   function handleNewSession() {
@@ -215,9 +234,10 @@ export default function App() {
       onCancel={handleCancel}
       onNewSession={handleNewSession}
       onQueryChange={setQuery}
+      onRemoveStaged={handleRemoveStaged}
+      onRemoveUploaded={handleRemoveUploaded}
       onStagedItemsChange={setStagedItems}
       onSubmit={handleSubmit}
-      onUpload={handleUpload}
       query={query}
       stagedItems={stagedItems}
       uploadedItems={session.uploadedItems}

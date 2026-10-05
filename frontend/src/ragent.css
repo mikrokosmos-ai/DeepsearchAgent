@@ -1392,7 +1392,8 @@
   border: var(--agent-hair);
   border-radius: 999px;
   background: var(--agent-surface);
-  padding: 3px var(--agent-s3);
+  /* 右内边距收窄：给胶囊内的移除按钮让位 */
+  padding: 3px 5px 3px var(--agent-s3);
   font-size: var(--agent-t-xs);
   color: var(--agent-muted);
 }
@@ -1407,6 +1408,34 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 胶囊内的移除 / 取消按钮：默认低调，hover 才显形 */
+.agent-app .agent-file-x {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--agent-faint);
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  padding: 0;
+}
+
+.agent-app .agent-file-x:hover {
+  background: var(--agent-sunk);
+  color: var(--agent-ink);
+}
+
+.agent-app .agent-file-x:focus-visible {
+  outline: 2px solid var(--agent-signal);
+  outline-offset: 1px;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
