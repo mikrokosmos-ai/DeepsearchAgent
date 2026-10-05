@@ -133,7 +133,7 @@ async def run_deep_agent(task_query, session_id):
 
     # 运行元数据：进入函数即开始计时，收尾时连同结局一起写入 agent_run 集合
     started_at = time.perf_counter()
-    # 检索漏斗（T5）：thread_id 跨任务复用，启动前必须清一次 ——
+    # 检索漏斗：thread_id 跨任务复用，启动前必须清一次 ——
     # 否则上一次任务的漏斗会残留，被本次收尾当成"本次指标"写入（静默失真）。
     reset_retrieval_funnel(session_id)
     # 同上：thread_id 跨任务复用，图片收集器不清理会把上一轮的图挂到本轮答案上
@@ -294,7 +294,6 @@ async def run_deep_agent(task_query, session_id):
         reset_session_context(session_dir_token, session_id_token)
         # 清理协作式取消标志，避免内存态随会话数累积
         clear_cancel(session_id)
-        # ---- §5 运行元数据：**必须在任何 clear_* 之前取数** ----
         # clear_budgets / clear_tool_failures / clear_subagent_reports 会把本次任务的
         # 计数与标记清空，先清再取就只能拿到空值 —— 这条顺序是本模块最容易踩的坑。
         report_summary = summarize_subagent_reports(session_id)
