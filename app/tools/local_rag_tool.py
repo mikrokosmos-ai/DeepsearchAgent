@@ -26,6 +26,8 @@ from app.api.context import get_thread_context
 from app.api.monitor import monitor
 from app.api.rag_event_bridge import RagEventBridge
 from app.core.logger import logger
+# 知识库配图：同样由子图 state 带出，供主智能体收尾落库（历史回读时展示）
+from app.core.knowledge_image_store import record_images
 # 检索漏斗指标：子图 state 里的 retrieval_funnel 经此带出，供收尾写入 agent_run
 from app.core.retrieval_funnel_store import record_funnel
 from app.core.tool_failfast import get_tool_failure, mark_tool_failed
@@ -104,6 +106,11 @@ def local_rag_search(question: str) -> str:
         funnel = result_state.get("retrieval_funnel") or {}
         if record_funnel(session_id, funnel):
             logger.info(f"已采集检索漏斗指标：session_id={session_id}，{funnel}")
+
+        # 图片地址不在本工具的返回值里（汇总环节会丢），走会话级收集器带到收尾落库
+        images = result_state.get("image_urls") or []
+        if record_images(session_id, images):
+            logger.info(f"已采集知识库配图：session_id={session_id}，{images}")
 
         answer = (result_state.get("answer") or "").strip()
 

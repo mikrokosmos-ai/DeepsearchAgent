@@ -36,6 +36,12 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
+# 知识库配图：与检索漏斗同一条「子图 state → 主智能体收尾」通道
+from app.core.knowledge_image_store import (
+    clear_images as clear_knowledge_images,
+    get_images as get_knowledge_images,
+    reset_images as reset_knowledge_images,
+)
 from app.core.retrieval_funnel_store import (
     clear_funnel as clear_retrieval_funnel,
     get_funnel as get_retrieval_funnel,
@@ -130,6 +136,8 @@ async def run_deep_agent(task_query, session_id):
     # 检索漏斗（T5）：thread_id 跨任务复用，启动前必须清一次 ——
     # 否则上一次任务的漏斗会残留，被本次收尾当成"本次指标"写入（静默失真）。
     reset_retrieval_funnel(session_id)
+    # 同上：thread_id 跨任务复用，图片收集器不清理会把上一轮的图挂到本轮答案上
+    reset_knowledge_images(session_id)
     # 结局标记由各分支显式设置；默认 unknown 便于暴露"漏设"（收尾时读它落库）
     outcome = "unknown"
 
@@ -239,8 +247,14 @@ async def run_deep_agent(task_query, session_id):
                             logger.info(
                                 f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
                             )
-                            # P1-6：先落库再推送 —— 前端刷新/断线后可从 /api/history 回读
-                            save_agent_message(session_id, "assistant", last_msg.content)
+                            # 先落库再推送 —— 前端刷新/断线后可从 /api/history 回读
+                            # 图片不在主智能体可见的返回值里，只能从会话级收集器取
+                            save_agent_message(
+                                session_id,
+                                "assistant",
+                                last_msg.content,
+                                image_urls=get_knowledge_images(session_id),
+                            )
                             monitor.report_task_result(last_msg.content)
 
         # 流式执行自然结束 = 本次任务成功走完（无异常、未被取消）
@@ -271,7 +285,6 @@ async def run_deep_agent(task_query, session_id):
     except Exception as e:
         # 异步执行异常也走 monitor，保证前端能收到明确错误事件；
         # 同时把完整堆栈写入服务端日志 —— 只上报异常摘要会让线上排查无从下手
-        # （实测：凭据含非 ASCII 字符时 httpx 在 header 编码阶段抛错，
         #  前端仅显示 "'ascii' codec can't encode ..."，无法定位到具体 header）。
         outcome = "error"
         logger.exception(f"主智能体执行异常：{e}")
@@ -318,6 +331,7 @@ async def run_deep_agent(task_query, session_id):
         clear_budgets(session_id)
         clear_subagent_reports(session_id)
         clear_retrieval_funnel(session_id)
+        clear_knowledge_images(session_id)
 
 
 if __name__ == "__main__":

@@ -132,10 +132,6 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
             "ts": 1,
         }
         # 按 (ts, _id) 降序取最近 limit 条，再反转为正序。
-        # ⚠️ 必须带 `_id` 作第二排序键：`ts` 来自 datetime.now()，在 Windows 上粒度约 15.6ms，
-        # 同一 tick 写入的两条消息 `ts` 完全相同；只按 ts 排序时并列顺序不确定，
-        # 再叠加下面的 reverse() 就会把同一轮的「提问/回答」读反
-        # （与 P1-6 的 get_agent_messages 属同一类缺陷，那边已修）。
         cursor = (
             mongo_tool.chat_message.find(query, projection)
             .sort([("ts", -1), ("_id", -1)])
@@ -150,10 +146,14 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
 
 
 
-# 主智能体会话历史（P1-6）
-def save_agent_message(session_id: str, role: str, text: str) -> bool:
+# 主智能体会话历史
+def save_agent_message(
+    session_id: str, role: str, text: str, image_urls: List[str] = None
+) -> bool:
     """
     保存主智能体这一层的一条问答消息（用户提问 / 最终回答）。
+
+    :param image_urls: 本轮答案关联的知识库配图（可空）
     :return: 是否写入成功
     """
     if not session_id or not str(text or "").strip():
@@ -165,6 +165,9 @@ def save_agent_message(session_id: str, role: str, text: str) -> bool:
                 "session_id": session_id,
                 "role": role,
                 "text": text,
+                "image_urls": [
+                    url for url in (image_urls or []) if isinstance(url, str) and url.strip()
+                ],
                 "ts": datetime.now().timestamp(),
             }
         )
@@ -172,6 +175,20 @@ def save_agent_message(session_id: str, role: str, text: str) -> bool:
     except Exception as e:
         logger.warning(f"保存主智能体消息失败（不影响任务本身）：session={session_id}，原因：{e}")
         return False
+
+
+def _normalize_agent_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    补齐图片字段：本次改造前写入的旧文档没有 `image_urls`，
+    统一归一成字符串列表，避免前端拿到 None 后渲染崩掉。
+    """
+    raw = message.get("image_urls")
+    message["image_urls"] = (
+        [url for url in raw if isinstance(url, str) and url.strip()]
+        if isinstance(raw, list)
+        else []
+    )
+    return message
 
 
 def get_agent_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
@@ -182,20 +199,21 @@ def get_agent_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]
 
     :param session_id: 会话唯一标识（即 thread_id）
     :param limit: 最多返回多少条（默认 50）
-    :return: [{"role": "user"|"assistant", "text": str, "ts": float}, ...]；失败返回空列表
+    :return: [{"role": "user"|"assistant", "text": str, "image_urls": [...], "ts": float}, ...]；失败返回空列表
     """
     mongo_tool = get_history_mongo_tool()
     try:
         cursor = (
             mongo_tool.agent_message.find(
-                {"session_id": session_id}, {"_id": 0, "role": 1, "text": 1, "ts": 1}
+                {"session_id": session_id},
+                {"_id": 0, "role": 1, "text": 1, "image_urls": 1, "ts": 1},
             )
             .sort([("ts", -1), ("_id", -1)])
             .limit(limit)
         )
         messages = list(cursor)
         messages.reverse()
-        return messages
+        return [_normalize_agent_message(message) for message in messages]
     except Exception as e:
         logger.warning(f"读取主智能体历史失败：session={session_id}，原因：{e}")
         return []

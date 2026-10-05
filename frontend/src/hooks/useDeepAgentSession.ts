@@ -207,6 +207,13 @@ export function useDeepAgentSession() {
               .find((message) => message.role === "assistant" && message.text);
             if (lastAssistant) {
               setResult((previous) => previous || lastAssistant.text);
+              // 图片同样只在本地还没有时回填，避免覆盖正在推送的新一轮图片
+              const restored = lastAssistant.image_urls ?? [];
+              if (restored.length > 0) {
+                setImageUrls((previous) =>
+                  previous.length > 0 ? previous : mergeImageUrls([], restored)
+                );
+              }
             }
           })
           .catch(() => {

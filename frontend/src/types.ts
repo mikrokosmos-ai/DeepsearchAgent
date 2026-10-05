@@ -72,6 +72,8 @@ export interface UploadedItem {
 export interface SessionHistoryMessage {
   role: "user" | "assistant" | string;
   text: string;
+  /** 该条答案关联的知识库配图；旧数据缺该字段时后端已归一为空数组 */
+  image_urls?: string[];
   ts: number;
 }
 
