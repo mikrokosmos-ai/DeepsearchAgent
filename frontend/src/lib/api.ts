@@ -30,7 +30,12 @@ export async function requestJson<T>(input: RequestInfo | URL, init?: RequestIni
   return payload as T;
 }
 
-export async function startTask(query: string, threadId: string): Promise<TaskResponse> {
+/** 启动一次研搜任务；userId 为可选身份，缺省时后端按会话级处理记忆 */
+export async function startTask(
+  query: string,
+  threadId: string,
+  userId?: string
+): Promise<TaskResponse> {
   return requestJson<TaskResponse>(apiUrl("/api/task"), {
     method: "POST",
     headers: {
@@ -38,7 +43,8 @@ export async function startTask(query: string, threadId: string): Promise<TaskRe
     },
     body: JSON.stringify({
       query,
-      thread_id: threadId
+      thread_id: threadId,
+      user_id: userId
     })
   });
 }

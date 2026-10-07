@@ -8,7 +8,7 @@ from app.rag.pipelines.query_pipeline.state import QueryGraphState, resolve_trac
 from app.core.logger import logger, node_log, step_log
 from app.prompts.loader import load_prompt
 from app.rag.clients.llm_client import get_llm_client
-from app.rag.repositories.history_repo import save_chat_message
+from app.core.memory import conversation_repo
 from app.rag.conf.query_pipeline_config import query_pipeline_config
 
 _IMAGE_BLOCK_MARKER = "【图片】"
@@ -466,7 +466,7 @@ def _strip_untrusted_links(answer: str) -> str:
 @step_log("step_4_write_history")
 def step_4_write_history(state: QueryGraphState, image_urls=None) -> QueryGraphState:
     """
-    阶段四：把本轮答案写入 MongoDB history。
+    阶段四：把本轮答案写入统一会话集合（rag 层）。
     """
     session_id = state.get("session_id", "default")
     answer = (state.get("answer") or "").strip()
@@ -474,18 +474,17 @@ def step_4_write_history(state: QueryGraphState, image_urls=None) -> QueryGraphS
 
     try:
         if answer:
-            save_chat_message(
+            conversation_repo.append_message(
                 session_id=session_id,
+                layer=conversation_repo.LAYER_RAG,
                 role="assistant",
                 text=answer,
-                rewritten_query="",
                 item_names=item_names,
                 image_urls=image_urls,
-                message_id=None
             )
     except Exception as e:
         # 写历史失败不应影响主链路
-        logger.error(f"写入Mongo历史记录失败: {e}")
+        logger.error(f"写入会话历史记录失败: {e}")
 
     return state
 

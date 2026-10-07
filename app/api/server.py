@@ -119,6 +119,8 @@ class TaskRequest(BaseModel):
 
     query: str
     thread_id: str = None
+    # 用户身份：前端生成并持久化。可选 —— 缺省时记忆按会话级处理，为将来接入登录留口
+    user_id: str = None
 
 
 def _forget_task(thread_id: str, task: asyncio.Task) -> None:
@@ -159,7 +161,7 @@ async def run_task(request: TaskRequest):
     reset_subagent_reports(thread_id)
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
+    task = asyncio.create_task(run_deep_agent(request.query, thread_id, request.user_id))
     active_tasks[thread_id] = task
     task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
 
@@ -393,8 +395,8 @@ async def get_session_history(thread_id: str):
     读取指定会话的主智能体问答历史
 
     用途：最终答案此前**只经 WebSocket 推送**，页面刷新或断线重连后就永久看不到了。
-    现在 run_deep_agent 会把用户提问与最终答案落库（`agent_message` 集合），
-    前端重连后调用本接口即可回读。
+    现在 run_deep_agent 会把用户提问与最终答案落库（统一会话集合 messages 的 agent 层，
+    经 history_repo 兼容入口读取），前端重连后调用本接口即可回读。
 
     :param thread_id: 会话 ID（即任务 thread_id）
     :return: {"thread_id":..., "messages":[{"role":"user"|"assistant","text":...,"ts":...}]}

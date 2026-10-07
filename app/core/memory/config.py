@@ -9,6 +9,7 @@
     | 压缩保留段          | 20%                   | 切点之后至少留这么多原文         |
     | 摘要正文上限        | 10%，夹 [1500, 6000]   |                               |
     | 长期记忆块上限      | 0.5%，夹 [1500, 6000]  | 全量注入，故同时是记忆总量硬上界 |
+    | 会话历史读取预算    | 20%                   | 按预算取最近若干轮，替代固定 10 条 |
     | 合并停手水位        | 75% × 块上限           | 兼任淘汰硬下限                  |
     | 后台抽取门槛        | 3 条                  | flush 工具不受此门槛挡          |
     | 保留工具循环        | 2 个                  | 保护窗口                        |
@@ -32,6 +33,8 @@ COMPACT_KEEP_RATIO = 0.20
 SUMMARY_MAX_RATIO = 0.10
 LONG_TERM_MAX_RATIO = 0.005
 CONSOLIDATION_FLOOR_RATIO = 0.75
+# 会话历史读取预算占比：固定 10 条会随消息变长而超窗，故改成按字符预算取最近若干轮
+HISTORY_BUDGET_RATIO = 0.20
 
 # ---- 摘要 / 长期记忆块的 clamp 区间 ----
 SUMMARY_MIN_CHARS = 1500
@@ -46,8 +49,15 @@ DEFAULT_PROTECT_TOOL_LOOPS = 2
 # ---- checkpointer 相关默认值 ----
 # 命名规范：dsa:<域>:<对象>，各域互不重叠，便于运维按前缀清库
 DEFAULT_CKPT_KEY_PREFIX = "dsa:ckpt:"
-# 默认 7 天：会话记忆是热层，长期留存由权威库（负责，热层允许自然过期
+# 默认 7 天：会话记忆是热层，长期留存由权威库（L1）负责，热层允许自然过期
 DEFAULT_CKPT_TTL_S = 7 * 24 * 3600
+
+# ---- 会话消息热窗口 ----
+# key 前缀与 checkpointer 分域，避免两类键混在同一命名空间
+DEFAULT_CONV_KEY_PREFIX = "dsa:conv:"
+# 默认 1 小时：热窗口只服务「同一会话连续几轮」，比 L0 的 TTL 短得多；
+# 过期只影响一次回源，不影响正确性（Mongo 是权威）
+DEFAULT_CONV_TTL_S = 3600
 
 # 派生量字段名清单：验证脚本按它打印/比对，避免"改了派生表但脚本没跟上"
 DERIVED_FIELD_NAMES = (
@@ -57,11 +67,15 @@ DERIVED_FIELD_NAMES = (
     "compact_keep_chars",
     "summary_max_chars",
     "long_term_max_chars",
+    "history_budget_chars",
     "consolidation_floor_chars",
     "background_extract_min_messages",
     "protect_tool_loops",
     "ckpt_key_prefix",
     "ckpt_ttl_s",
+    "conv_key_prefix",
+    "conv_ttl_s",
+    "conv_cache_enabled",
 )
 
 
@@ -97,12 +111,16 @@ class MemoryConfig:
     compact_keep_chars: int  # 压缩保留段下限
     summary_max_chars: int  # 摘要正文上限
     long_term_max_chars: int  # 长期记忆块/总量上限
+    history_budget_chars: int  # 会话历史读取预算（替代固定 10 条）
     consolidation_floor_chars: int  # 合并停手水位兼淘汰硬下限
     background_extract_min_messages: int  # 后台抽取门槛
     protect_tool_loops: int  # 工具循环保留数
     ckpt_key_prefix: str  # checkpointer key 前缀
     ckpt_ttl_s: int  # checkpointer key TTL，秒；<=0 表示不过期
     ckpt_refresh_on_read: bool  # 读时续期：让活跃会话的热数据不因读多写少而过期
+    conv_key_prefix: str  # 会话消息热窗口 key 前缀
+    conv_ttl_s: int  # 热窗口 key TTL，秒；<=0 表示不过期
+    conv_cache_enabled: bool  # 热窗口总开关；关闭时全部回源 Mongo
 
 
 def _build() -> MemoryConfig:
@@ -127,12 +145,16 @@ def _build() -> MemoryConfig:
             int(budget * SUMMARY_MAX_RATIO), SUMMARY_MIN_CHARS, SUMMARY_MAX_LIMIT_CHARS
         ),
         long_term_max_chars=long_term_max,
+        history_budget_chars=int(budget * HISTORY_BUDGET_RATIO),
         consolidation_floor_chars=int(long_term_max * CONSOLIDATION_FLOOR_RATIO),
         background_extract_min_messages=DEFAULT_BACKGROUND_EXTRACT_MIN_MESSAGES,
         protect_tool_loops=DEFAULT_PROTECT_TOOL_LOOPS,
         ckpt_key_prefix=prefix,
         ckpt_ttl_s=_env_int("MEMORY_CKPT_TTL_S", DEFAULT_CKPT_TTL_S),
         ckpt_refresh_on_read=_env_bool("MEMORY_CKPT_REFRESH_ON_READ", True),
+        conv_key_prefix=(os.getenv("MEMORY_CONV_PREFIX") or "").strip() or DEFAULT_CONV_KEY_PREFIX,
+        conv_ttl_s=_env_int("MEMORY_CONV_TTL_S", DEFAULT_CONV_TTL_S),
+        conv_cache_enabled=_env_bool("MEMORY_CONV_CACHE_ENABLE", True),
     )
 
 

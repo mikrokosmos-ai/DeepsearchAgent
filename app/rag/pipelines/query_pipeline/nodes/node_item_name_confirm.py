@@ -8,7 +8,7 @@ from app.rag.conf.query_pipeline_config import query_pipeline_config
 from app.prompts.loader import load_prompt
 from app.rag.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
-from app.rag.repositories.history_repo import get_recent_messages, save_chat_message
+from app.core.memory import conversation_repo
 from app.rag.repositories.vector_search_repo import create_hybrid_search_requests, hybrid_search
 from app.rag.clients.llm_client import get_llm_client
 from app.rag.clients.embedding_client import generate_embeddings
@@ -36,7 +36,7 @@ ITEM_NAME_MATCH_WEIGHTS = (
   出参:  item_names / rewritten_query / history / answer(未确权时的兜底提示)
   步骤:
        1. 参数校验 (original_query | session_id)
-       2. 读取历史对话 (session_id -> Mongo)
+       2. 读取历史对话 (session_id -> 统一会话集合的 rag 层)
        3. LLM 提取商品名 + 问题改写
        4. 商品名向量混合检索
        5. 置信度分流：确认 / 待确认 / 未找到
@@ -61,8 +61,8 @@ def step_1_data_validates(state):
 
 @step_log("step_2_chat_history")
 def step_2_chat_history(session_id):
-    """历史聊天记录"""
-    return get_recent_messages(session_id)
+    """历史聊天记录（统一会话集合的 rag 层，按字符预算取最近若干轮）"""
+    return conversation_repo.get_window(session_id, conversation_repo.LAYER_RAG)
 
 
 @step_log("step_3_llm_itemnames_and_rewrite")
@@ -246,16 +246,17 @@ def step_6_deal_state(state, final_result, rewritten_query, history_chats):
 
 @step_log("step_7_save_user_chat_message")
 def step_7_save_user_chat_message(state):
-    """保存本轮用户消息到 Mongo 历史"""
+    """保存本轮用户消息到统一会话集合（rag 层）"""
     # 加固点：未走"确权成功"分支时 state 可能缺少 item_names / rewritten_query
     #       （例如调用方只传了 original_query），此处统一兜底，避免 KeyError。
     #       经 graph 调用时默认 state 已保证两键存在，故本兜底零行为变化。
-    save_chat_message(
+    conversation_repo.append_message(
         session_id=state["session_id"],
+        layer=conversation_repo.LAYER_RAG,
         role="user",
         text=state["original_query"],
         rewritten_query=state.get("rewritten_query") or "",
-        item_names=state.get("item_names") or []
+        item_names=state.get("item_names") or [],
     )
 
 

@@ -8,7 +8,7 @@ import {
   uploadSessionFiles
 } from "../lib/api";
 import { WS_BASE_URL } from "../lib/config";
-import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
+import { createThreadId, getStoredThreadId, getStoredUserId, storeThreadId } from "../lib/thread";
 import type {
   ConnectionState,
   MonitorMessage,
@@ -348,7 +348,7 @@ export function useDeepAgentSession() {
       setLastError("");
       setImageUrls([]);
       try {
-        const response = await startTask(cleanQuery, threadId);
+        const response = await startTask(cleanQuery, threadId, getStoredUserId());
         if (response.thread_id && response.thread_id !== threadId) {
           storeThreadId(response.thread_id);
           setThreadId(response.thread_id);

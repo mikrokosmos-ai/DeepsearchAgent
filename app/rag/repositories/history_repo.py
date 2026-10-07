@@ -11,6 +11,8 @@ from bson import ObjectId
 
 from app.rag.clients.mongo_client import get_history_mongo_tool
 from app.core.logger import logger
+# 主智能体层的读写已统一到会话仓储；本模块只保留旧集合的兼容出入口
+from app.core.memory import conversation_repo
 
 
 def clear_history(session_id: str) -> int:
@@ -112,7 +114,10 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
     """
     查询指定会话的最近 N 条对话记录，返回清洗后的字典列表（不含 Mongo 内部字段）
 
-    结果按时间正序排列，可直接喂给 LLM 作为上下文。
+    阶段 2 起本函数已是**旧集合只读入口**：新写入一律落统一会话集合（messages），
+    生产链路（RAG 指代消解）已改走 app.core.memory.conversation_repo。
+    保留原实现不重定向，是因为既有回归脚本以此为「字段投影保证」的锚点
+    （见 scripts/verify_nested_checkpoint_isolation.py 第 3 节），改动它等于顺手改契约。
 
     :param session_id: 会话唯一标识，用于筛选指定会话的记录
     :param limit: 条数限制，默认返回最近 10 条
@@ -156,64 +161,22 @@ def save_agent_message(
     :param image_urls: 本轮答案关联的知识库配图（可空）
     :return: 是否写入成功
     """
-    if not session_id or not str(text or "").strip():
-        return False
-    try:
-        mongo_tool = get_history_mongo_tool()
-        mongo_tool.agent_message.insert_one(
-            {
-                "session_id": session_id,
-                "role": role,
-                "text": text,
-                "image_urls": [
-                    url for url in (image_urls or []) if isinstance(url, str) and url.strip()
-                ],
-                "ts": datetime.now().timestamp(),
-            }
-        )
-        return True
-    except Exception as e:
-        logger.warning(f"保存主智能体消息失败（不影响任务本身）：session={session_id}，原因：{e}")
-        return False
-
-
-def _normalize_agent_message(message: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    补齐图片字段：本次改造前写入的旧文档没有 `image_urls`，
-    统一归一成字符串列表，避免前端拿到 None 后渲染崩掉。
-    """
-    raw = message.get("image_urls")
-    message["image_urls"] = (
-        [url for url in raw if isinstance(url, str) and url.strip()]
-        if isinstance(raw, list)
-        else []
+    return conversation_repo.append_message(
+        session_id,
+        conversation_repo.LAYER_AGENT,
+        role,
+        text,
+        image_urls=image_urls,
     )
-    return message
 
 
 def get_agent_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     """
     读取指定会话的主智能体问答历史（按时间正序）。
-
-    用于 WebSocket 断线 / 页面刷新后回读最终结果 —— 这是 P1-6 的"可回读"入口。
+    用于 WebSocket 断线 / 页面刷新后回读最终结果 ——
 
     :param session_id: 会话唯一标识（即 thread_id）
     :param limit: 最多返回多少条（默认 50）
     :return: [{"role": "user"|"assistant", "text": str, "image_urls": [...], "ts": float}, ...]；失败返回空列表
     """
-    mongo_tool = get_history_mongo_tool()
-    try:
-        cursor = (
-            mongo_tool.agent_message.find(
-                {"session_id": session_id},
-                {"_id": 0, "role": 1, "text": 1, "image_urls": 1, "ts": 1},
-            )
-            .sort([("ts", -1), ("_id", -1)])
-            .limit(limit)
-        )
-        messages = list(cursor)
-        messages.reverse()
-        return [_normalize_agent_message(message) for message in messages]
-    except Exception as e:
-        logger.warning(f"读取主智能体历史失败：session={session_id}，原因：{e}")
-        return []
+    return conversation_repo.get_agent_history(session_id, limit)

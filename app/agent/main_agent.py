@@ -31,12 +31,15 @@ from app.api.context import (
     reset_session_context,
     set_session_context,
     set_thread_context,
+    set_user_context,
 )
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
 # checkpointer 由记忆层工厂决定：优先 Redis 持久化，Redis 不可用时回退进程内内存实现
 from app.core.memory.checkpointer import build_checkpointer
+# 统一会话消息层：L0（图状态）为空时用它补齐上下文，见 _build_history_messages
+from app.core.memory import conversation_repo
 # 知识库配图：与检索漏斗同一条「子图 state → 主智能体收尾」通道
 from app.core.knowledge_image_store import (
     clear_images as clear_knowledge_images,
@@ -120,7 +123,30 @@ main_agent = create_deep_agent(
 # 本模块只消费 resolve_session_dir() / UPDATED_SESSIONS_DIR，不再自行拼接路径。
 
 
-async def run_deep_agent(task_query, session_id):
+async def _build_history_messages(config, session_id):
+    """
+    L0 无历史时，用 L1（统一会话层）补齐上下文
+    """
+    state_getter = getattr(main_agent, "aget_state", None)
+    if state_getter is None:
+        return []
+    try:
+        snapshot = await state_getter(config)
+    except Exception as e:  # noqa: BLE001  读不到状态不能阻断任务
+        logger.warning(f"[Memory] 读取图状态失败，按已有历史处理（不注入 L1）：{e}")
+        return []
+    values = getattr(snapshot, "values", None) or {}
+    if values.get("messages"):
+        return []
+    messages = conversation_repo.build_context_messages(session_id)
+    if messages:
+        logger.info(
+            f"[Memory] L0 无历史，用 L1 补齐上下文：session={session_id}，条数={len(messages)}"
+        )
+    return messages
+
+
+async def run_deep_agent(task_query, session_id, user_id=None):
     """
     异步流式执行主智能体
 
@@ -128,6 +154,7 @@ async def run_deep_agent(task_query, session_id):
     复制上传文件、写入 ContextVar，并在流式执行过程中把关键事件上报给前端。
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
+    :param user_id: 前端持久化的稳定用户 ID（可选）；缺省时记忆按会话级处理，不报错
     """
     logger.info(f"[MainAgent] 开始执行会话，session_id={session_id}")
 
@@ -173,6 +200,8 @@ async def run_deep_agent(task_query, session_id):
     # ContextVar 让深层工具无需显式传参，也能拿到当前会话目录和 WebSocket thread_id
     session_dir_token = set_session_context(session_dir_str)
     session_id_token = set_thread_context(session_id)
+    # 用户身份同样是请求级横切信息：落库时由会话仓储直接取，不必逐层透传
+    user_id_token = set_user_context(user_id)
 
     # 前端拿到工作目录后，可以展示本次任务生成的 Markdown/PDF 等产物
     monitor.report_session_dir(session_dir_str)
@@ -206,12 +235,21 @@ async def run_deep_agent(task_query, session_id):
             monitor.report_task_cancelled()
             return
 
+        # L1 必须在「本轮用户消息落库之前」组装：否则刚写入的本轮会被当成历史，
+        # 与下面 payload 里的本轮一起进上下文，同一句话出现两遍。
+        history_messages = await _build_history_messages(config, session_id)
+
         # 把用户提问落库，使刷新/断线后仍能看到完整问答（写入失败不影响任务）
         save_agent_message(session_id, "user", task_query)
 
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
         async for chunk in main_agent.astream(
-            {"messages": [{"role": "user", "content": task_query + path_instruction}]},
+            {
+                "messages": [
+                    *history_messages,
+                    {"role": "user", "content": task_query + path_instruction},
+                ]
+            },
             config=config,
         ):
             # 协作式取消检查点：astream 的每一轮都是一次可中断边界。
@@ -291,7 +329,7 @@ async def run_deep_agent(task_query, session_id):
         monitor.report_custom("error", f"执行主智能发生异常信息：{str(e)}")
     finally:
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
-        reset_session_context(session_dir_token, session_id_token)
+        reset_session_context(session_dir_token, session_id_token, user_id_token)
         # 清理协作式取消标志，避免内存态随会话数累积
         clear_cancel(session_id)
         # clear_budgets / clear_tool_failures / clear_subagent_reports 会把本次任务的

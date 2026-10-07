@@ -18,6 +18,11 @@ _thread_id_ctx: ContextVar[Optional[str]] = ContextVar(
     "thread_id",
     default=None,
 )
+# 用户身份：前端生成并持久化，随请求带入。可选 —— 缺省时记忆按会话级处理（不报错）
+_user_id_ctx: ContextVar[Optional[str]] = ContextVar(
+    "user_id",
+    default=None,
+)
 
 
 def set_session_context(path: str) -> Token[Optional[str]]:
@@ -58,16 +63,39 @@ def get_thread_context() -> Optional[str]:
     return _thread_id_ctx.get()
 
 
+def set_user_context(user_id: Optional[str]) -> Token[Optional[str]]:
+    """
+    设置当前请求链路的用户身份
+
+    :param user_id: 前端持久化的稳定用户 ID；为空表示按会话级处理
+    :return: reset 时需要使用的上下文 token
+    """
+    return _user_id_ctx.set(user_id)
+
+
+def get_user_context() -> Optional[str]:
+    """
+    获取当前请求链路的用户身份
+
+    :return: 用户 ID；未设置（前端未上报）时返回 None
+    """
+    return _user_id_ctx.get()
+
+
 def reset_session_context(
     session_token: Token[Optional[str]],
     thread_token: Optional[Token[Optional[str]]] = None,
+    user_token: Optional[Token[Optional[str]]] = None,
 ) -> None:
     """
     恢复请求上下文，避免本次任务信息残留到后续请求
 
     :param session_token: set_session_context 返回的 token
     :param thread_token: set_thread_context 返回的 token
+    :param user_token: set_user_context 返回的 token
     """
     _session_dir_ctx.reset(session_token)
     if thread_token is not None:
         _thread_id_ctx.reset(thread_token)
+    if user_token is not None:
+        _user_id_ctx.reset(user_token)

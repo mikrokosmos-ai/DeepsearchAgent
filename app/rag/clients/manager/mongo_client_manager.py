@@ -25,6 +25,11 @@ AGENT_RUN_COLLECTION = "agent_run"
 # MD 是唯一事实源，本集合只登记元数据，不存正文。
 KB_DOC_COLLECTION = "kb_document"
 
+# 统一会话模型（阶段 2）：conversations 一行一个会话，messages 一行一条消息。
+# 旧集合 chat_message / agent_message 保留为只读兜底，不再写入。
+CONVERSATION_COLLECTION = "conversations"
+MESSAGE_COLLECTION = "messages"
+
 
 class HistoryMongoTool:
     """
@@ -51,6 +56,9 @@ class HistoryMongoTool:
         self.agent_run = self.db[AGENT_RUN_COLLECTION]
         # 知识库文档登记
         self.kb_document = self.db[KB_DOC_COLLECTION]
+        # 统一会话模型（新写入目标）
+        self.conversation = self.db[CONVERSATION_COLLECTION]
+        self.message = self.db[MESSAGE_COLLECTION]
 
         # 复合索引：session_id 升序 + ts 降序，匹配「按会话取最新消息」这一核心查询
         self.chat_message.create_index([("session_id", 1), ("ts", -1)])
@@ -60,6 +68,12 @@ class HistoryMongoTool:
         self.kb_document.create_index([("doc_id", 1)], unique=True)
         # 列表页核心查询：按状态过滤 + 最新在前
         self.kb_document.create_index([("status", 1), ("ts", -1)])
+        # 会话按 session_id 唯一（thread_id 即会话主键）；另建用户维度的列举索引
+        self.conversation.create_index([("session_id", 1)], unique=True)
+        self.conversation.create_index([("user_id", 1), ("updated_at", -1)])
+        # 消息的两条读取路径：按「会话 + 层」取窗口；按会话整体回读
+        self.message.create_index([("session_id", 1), ("layer", 1), ("ts", -1)])
+        self.message.create_index([("session_id", 1), ("ts", -1)])
 
         logger.info(f"MongoDB 连接成功：{self.db_name}")
 
