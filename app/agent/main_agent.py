@@ -17,7 +17,6 @@ from deepagents.profiles import (
     HarnessProfile,
     register_harness_profile,
 )
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
 from app.agent.llm import model
@@ -36,6 +35,8 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.core.cancel import TaskCancelledError, clear_cancel, is_cancelled
 from app.core.logger import logger
+# checkpointer 由记忆层工厂决定：优先 Redis 持久化，Redis 不可用时回退进程内内存实现
+from app.core.memory.checkpointer import build_checkpointer
 # 知识库配图：与检索漏斗同一条「子图 state → 主智能体收尾」通道
 from app.core.knowledge_image_store import (
     clear_images as clear_knowledge_images,
@@ -96,18 +97,17 @@ register_harness_profile(
     ),
 )
 
-# 主智能体是调度中心：
-# 1. tools 只放最终交付相关的文件工具
-# 2. subagents 放网络、数据库、本地知识库三类信息获取助手，外加一个受约束的通用整理助手
-# 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文
-# 4. middleware 全是纯增量：会话级次数护栏 + 子智能体返回契约观察者
+# 主智能体是调度中心：tools 只放最终交付相关的文件工具，信息获取一律交给 subagents；
+# middleware 均为纯增量（会话级次数护栏 + 子智能体返回契约观察者）。
+# checkpointer 的实现由记忆层工厂决定（Redis 优先、不可用时回退 InMemorySaver），
+# 此处只负责保证同一 thread_id 复用同一份执行上下文 —— 见 app/core/memory/checkpointer.py。
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
     tools=[generate_markdown, convert_md_to_pdf, read_file_content],
     # 会话级次数护栏：管 `task`（派发子智能体）的总量与单助手额度
     middleware=[ToolBudgetMiddleware(), SubAgentReportMiddleware()],
-    checkpointer=InMemorySaver(),
+    checkpointer=build_checkpointer(),
     subagents=[
         general_purpose_agent,
         database_query_agent,
