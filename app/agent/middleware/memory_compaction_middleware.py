@@ -2,66 +2,16 @@
 中期摘要压缩中间件（接管 deepagents 底座自带的那个）
 """
 
-import json
-from typing import Any, List
-
 from deepagents.backends import StateBackend
 from deepagents.middleware.summarization import _DeepAgentsSummarizationMiddleware
 
 from app.core.logger import logger
 from app.core.memory import summary_store
+# 字符计数口径集中在 chars.py（裁剪与摘要共用一把尺子）；保留同名导入，
+# 兼容按旧路径引用它的验证脚本。
+from app.core.memory.chars import count_message_chars  # noqa: F401
 from app.core.memory.config import memory_config
 from app.prompts.loader import load_prompt
-
-
-def _message_text(message) -> str:
-    """把一条消息拍成文本（content 可能是 str，也可能是 content blocks 列表）"""
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                value = item.get("text")
-                parts.append(value if isinstance(value, str) else str(item))
-        text = "".join(parts)
-    else:
-        text = "" if content is None else str(content)
-
-    calls = getattr(message, "tool_calls", None)
-    if calls:
-        # 工具调用的参数同样占上下文；漏算会让工具密集的会话被低估，阈值形同虚设
-        try:
-            text += json.dumps(calls, ensure_ascii=False, default=str)
-        except Exception:  # noqa: BLE001
-            text += str(calls)
-    return text
-
-
-def count_message_chars(messages, tools=None, **kwargs) -> int:
-    """
-    把「消息 + 工具 schema」折算成字符数，作为触发与保留段的计量口径
-    签名必须兼容底座的两处调用：带 tools 关键字的一处，以及内部偏函数的单参调用。
-    """
-    total = 0
-    for message in messages or ():
-        total += len(_message_text(message))
-    for tool in tools or ():
-        if isinstance(tool, dict):
-            schema: Any = tool
-        else:
-            schema = {
-                "name": getattr(tool, "name", ""),
-                "description": getattr(tool, "description", ""),
-            }
-        try:
-            total += len(json.dumps(schema, ensure_ascii=False, default=str))
-        except Exception:  # noqa: BLE001
-            total += len(str(schema))
-    return total
 
 
 class MemoryCompactionMiddleware(_DeepAgentsSummarizationMiddleware):
@@ -112,7 +62,7 @@ class MemoryCompactionMiddleware(_DeepAgentsSummarizationMiddleware):
             logger.warning(f"[Memory] 摘要审计异常（不影响压缩本身）：{e}")
 
 
-def build_compaction_middleware() -> List[Any]:
+def build_compaction_middleware() -> list:
     """
     `HarnessProfile.extra_middleware` 的工厂（协议要求无参 callable）
 

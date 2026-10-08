@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS t_agent_memory (
     id                BIGINT       NOT NULL AUTO_INCREMENT,
     user_id           VARCHAR(64)  NOT NULL COMMENT '用户维度：长期记忆按用户、不按会话',
     content           VARCHAR(1000) NOT NULL COMMENT '事实正文；单条业务上限由应用侧收敛到 500 字符',
+    source_kind       VARCHAR(16)  NOT NULL DEFAULT 'BATCH' COMMENT 'FLUSH=用户主动整理 / BATCH=后台批；容量淘汰排序用',
     source_session_id VARCHAR(64)  NULL COMMENT '产生该事实的会话，仅排查用',
     source_from       VARCHAR(64)  NULL COMMENT '素材区间起点（messages 的 ObjectId）',
     source_to         VARCHAR(64)  NULL COMMENT '素材区间终点（messages 的 ObjectId）',
@@ -68,6 +69,24 @@ CREATE TABLE IF NOT EXISTS t_agent_memory_control (
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_unicode_ci
   COMMENT = 'L3 控制面（版本号 + 抽取下界）';
+
+-- ===== 容量治理需要的来源列=====
+-- 已存在的库不会因 CREATE TABLE IF NOT EXISTS 而新增列；MySQL 8 也没有
+-- ADD COLUMN IF NOT EXISTS，故用 information_schema 判断 + 动态 SQL 保证幂等。
+SET @col_exists := (
+    SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'deepsearch_memory'
+      AND TABLE_NAME = 't_agent_memory'
+      AND COLUMN_NAME = 'source_kind'
+);
+SET @ddl := IF(
+    @col_exists = 0,
+    'ALTER TABLE t_agent_memory ADD COLUMN source_kind VARCHAR(16) NOT NULL DEFAULT ''BATCH'' AFTER content',
+    'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- ===== 应用用户授权 =====
 -- 与业务库的「只读」形成对照：长期记忆必须能写，但写权限**仅限本库**。

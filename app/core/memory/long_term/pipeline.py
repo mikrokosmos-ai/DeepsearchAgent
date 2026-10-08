@@ -11,9 +11,11 @@ from typing import Any, Dict, List, Optional
 
 from app.core.logger import logger
 from app.core.memory.config import memory_config
-from app.core.memory.long_term import judge, render, repository
+from app.core.memory.long_term import consolidation, judge, render, repository
 from app.core.memory.long_term.models import (
     SETTLED_STATUSES,
+    SOURCE_BATCH,
+    SOURCE_FLUSH,
     STATUS_CONFLICT,
     STATUS_DROPPED,
     STATUS_WRITTEN,
@@ -141,6 +143,8 @@ async def run_extraction(user_id: str, *, force: bool = False) -> Dict[str, Any]
         source=source,
         decisions=result.decisions,
         item_max_chars=memory_config.long_term_item_max_chars,
+        # 来源决定容量淘汰时的次序：用户主动要求记住的，最后才淘汰
+        source_kind=SOURCE_FLUSH if force else SOURCE_BATCH,
     )
 
     if status is None:
@@ -162,6 +166,11 @@ async def run_extraction(user_id: str, *, force: bool = False) -> Dict[str, Any]
             f"[LTM] 长期记忆总量越界告警：user={user_id}，{total_chars} > "
             f"{memory_config.long_term_max_chars} 字符（一期只告警，治理见阶段 5）"
         )
+
+    # 抽取是唯一会写事实库的路径，容量治理挂在它的收尾：
+    # 治理失败不影响抽取结论（maybe_consolidate 内部已把异常转成结果字典）
+    if written:
+        await consolidation.maybe_consolidate(user_id)
 
     return {
         "ok": True,

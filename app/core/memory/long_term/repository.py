@@ -4,7 +4,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import mysql.connector
 from mysql.connector import Error as MySQLError
@@ -17,6 +17,8 @@ from app.core.memory.long_term.models import (
     DECISION_RETRACT,
     DECISION_SUPERSEDE,
     SETTLED_STATUSES,
+    SOURCE_BATCH,
+    SOURCE_FLUSH,
     STATUS_CONFLICT,
     STATUS_DROPPED,
     STATUS_NOOP,
@@ -238,14 +240,112 @@ def _acceptable(content: str, item_max_chars: int) -> bool:
     return True
 
 
-def _insert_item(cur, user_id: str, content: str, source: SourceRange, now: datetime) -> int:
+def _insert_item(
+    cur,
+    user_id: str,
+    content: str,
+    source: Optional[SourceRange],
+    now: datetime,
+    source_kind: str = SOURCE_BATCH,
+) -> int:
+    """插入一条事实；治理路径没有素材区间，故 source 可为 None"""
     cur.execute(
         f"INSERT INTO {TABLE_ITEMS} "
-        "(user_id, content, source_session_id, source_from, source_to, invalid_at, create_time) "
-        "VALUES (%s, %s, %s, %s, %s, NULL, %s)",
-        (user_id, content, source.session_id, source.from_message_id, source.to_message_id, now),
+        "(user_id, content, source_kind, source_session_id, source_from, source_to, "
+        " invalid_at, create_time) "
+        "VALUES (%s, %s, %s, %s, %s, %s, NULL, %s)",
+        (
+            user_id,
+            content,
+            source_kind,
+            source.session_id if source else None,
+            source.from_message_id if source else None,
+            source.to_message_id if source else None,
+            now,
+        ),
     )
     return int(cur.lastrowid)
+
+
+def _apply_decisions(
+    cur,
+    user_id: str,
+    decisions: Iterable[Decision],
+    *,
+    source: Optional[SourceRange],
+    now: datetime,
+    item_max_chars: int,
+    source_kind: str = SOURCE_BATCH,
+) -> Tuple[int, int]:
+    """
+    在游标上应用一组决策，返回 (应用条数, 丢弃条数)
+
+    SUPERSEDE / RETRACT 都接受**多个目标**：合并组要把组内所有旧条目指向新条目，
+    容量淘汰也是一次撤一批 —— 只处理 target_ids[0] 会让这两条路径静默少做一半。
+    """
+    applied = 0
+    rejected = 0
+
+    for decision in decisions:
+        action = (decision.action or "").upper()
+
+        if action == DECISION_NOOP:
+            continue
+
+        if action == DECISION_CLEAR:
+            cur.execute(
+                f"UPDATE {TABLE_ITEMS} SET invalid_at = %s, superseded_by = NULL "
+                "WHERE user_id = %s AND invalid_at IS NULL",
+                (now, user_id),
+            )
+            applied += 1
+            continue
+
+        if action in (DECISION_SUPERSEDE, DECISION_RETRACT):
+            target_ids = [int(x) for x in (decision.target_ids or []) if str(x).isdigit()]
+            if not target_ids:
+                rejected += 1
+                logger.warning(f"[LTM] 决策缺少目标条目，已丢弃：action={action}")
+                continue
+
+            placeholders = ", ".join(["%s"] * len(target_ids))
+
+            if action == DECISION_RETRACT:
+                cur.execute(
+                    f"UPDATE {TABLE_ITEMS} SET invalid_at = %s, superseded_by = NULL "
+                    f"WHERE user_id = %s AND id IN ({placeholders}) AND invalid_at IS NULL",
+                    (now, user_id, *target_ids),
+                )
+                applied += 1 if cur.rowcount else 0
+                rejected += 0 if cur.rowcount else 1
+                continue
+
+            content = (decision.content or "").strip()
+            if not _acceptable(content, item_max_chars):
+                rejected += 1
+                continue
+            new_id = _insert_item(cur, user_id, content, source, now, source_kind)
+            cur.execute(
+                f"UPDATE {TABLE_ITEMS} SET invalid_at = %s, superseded_by = %s "
+                f"WHERE user_id = %s AND id IN ({placeholders}) AND invalid_at IS NULL",
+                (now, new_id, user_id, *target_ids),
+            )
+            applied += 1
+            continue
+
+        if action == DECISION_ADD:
+            content = (decision.content or "").strip()
+            if not _acceptable(content, item_max_chars):
+                rejected += 1
+                continue
+            _insert_item(cur, user_id, content, source, now, source_kind)
+            applied += 1
+            continue
+
+        rejected += 1
+        logger.warning(f"[LTM] 未知决策类型，已丢弃：action={decision.action!r}")
+
+    return applied, rejected
 
 
 def _row_to_item(row: Dict[str, Any]) -> MemoryItem:
@@ -253,6 +353,7 @@ def _row_to_item(row: Dict[str, Any]) -> MemoryItem:
         id=int(row["id"]),
         user_id=row["user_id"],
         content=row["content"] or "",
+        source_kind=row.get("source_kind") or SOURCE_BATCH,
         source_session_id=row.get("source_session_id"),
         source_from=row.get("source_from"),
         source_to=row.get("source_to"),
@@ -274,7 +375,8 @@ def list_items(user_id: str, *, include_invalid: bool = False) -> List[MemoryIte
     try:
         with _cursor(dictionary=True) as (_conn, cur):
             cur.execute(
-                f"SELECT id, user_id, content, source_session_id, source_from, source_to, "
+                f"SELECT id, user_id, content, source_kind, source_session_id, "
+                f"source_from, source_to, "
                 f"superseded_by, invalid_at, create_time FROM {TABLE_ITEMS} "
                 f"WHERE {where} ORDER BY id ASC",
                 (user_id,),
@@ -328,6 +430,7 @@ def commit_decisions(
     source: SourceRange,
     decisions: Iterable[Decision],
     item_max_chars: int,
+    source_kind: str = SOURCE_BATCH,
 ) -> Optional[str]:
     """
     在短事务里应用仲裁决策
@@ -377,63 +480,15 @@ def commit_decisions(
                 )
                 return STATUS_CONFLICT
 
-            for decision in decisions:
-                action = (decision.action or "").upper()
-
-                if action == DECISION_NOOP:
-                    continue
-
-                if action == DECISION_CLEAR:
-                    cur.execute(
-                        f"UPDATE {TABLE_ITEMS} SET invalid_at = %s WHERE user_id = %s "
-                        "AND invalid_at IS NULL",
-                        (now, user_id),
-                    )
-                    applied += 1
-                    continue
-
-                if action in (DECISION_SUPERSEDE, DECISION_RETRACT):
-                    target_ids = [int(x) for x in (decision.target_ids or []) if str(x).isdigit()]
-                    if not target_ids:
-                        rejected += 1
-                        logger.warning(f"[LTM] 决策缺少目标条目，已丢弃：action={action}")
-                        continue
-
-                    if action == DECISION_RETRACT:
-                        cur.execute(
-                            f"UPDATE {TABLE_ITEMS} SET invalid_at = %s, superseded_by = NULL "
-                            f"WHERE user_id = %s AND id = %s AND invalid_at IS NULL",
-                            (now, user_id, target_ids[0]),
-                        )
-                        applied += 1 if cur.rowcount else 0
-                        rejected += 0 if cur.rowcount else 1
-                        continue
-
-                    # SUPERSEDE：先插新行，再把旧行指向它
-                    content = (decision.content or "").strip()
-                    if not _acceptable(content, item_max_chars):
-                        rejected += 1
-                        continue
-                    new_id = _insert_item(cur, user_id, content, source, now)
-                    cur.execute(
-                        f"UPDATE {TABLE_ITEMS} SET invalid_at = %s, superseded_by = %s "
-                        f"WHERE user_id = %s AND id = %s AND invalid_at IS NULL",
-                        (now, new_id, user_id, target_ids[0]),
-                    )
-                    applied += 1
-                    continue
-
-                if action == DECISION_ADD:
-                    content = (decision.content or "").strip()
-                    if not _acceptable(content, item_max_chars):
-                        rejected += 1
-                        continue
-                    _insert_item(cur, user_id, content, source, now)
-                    applied += 1
-                    continue
-
-                rejected += 1
-                logger.warning(f"[LTM] 未知决策类型，已丢弃：action={decision.action!r}")
+            applied, rejected = _apply_decisions(
+                cur,
+                user_id,
+                decisions,
+                source=source,
+                now=now,
+                item_max_chars=item_max_chars,
+                source_kind=source_kind,
+            )
 
             if rejected:
                 logger.warning(
@@ -464,3 +519,56 @@ def commit_decisions(
         return None
 
     return final_status
+
+
+def apply_consolidation(
+    user_id: str,
+    *,
+    expected_revision: int,
+    decisions: Iterable[Decision],
+    item_max_chars: int,
+) -> Optional[str]:
+    """
+    容量治理的短事务：只应用决策 + 推版本号
+    """
+    if not _available():
+        return None
+
+    now = _now()
+    try:
+        with _cursor(dictionary=True) as (conn, cur):
+            conn.start_transaction()
+            cur.execute(
+                f"SELECT revision FROM {TABLE_CONTROL} WHERE user_id = %s FOR UPDATE", (user_id,)
+            )
+            control = cur.fetchone()
+            if control is None or int(control["revision"]) != int(expected_revision):
+                conn.rollback()
+                logger.info(f"[LTM] 治理提交冲突（版本号不一致）：user={user_id}")
+                return None
+
+            applied, rejected = _apply_decisions(
+                cur,
+                user_id,
+                decisions,
+                source=None,
+                now=now,
+                item_max_chars=item_max_chars,
+            )
+            if rejected:
+                logger.warning(f"[LTM] 治理有 {rejected} 条决策被丢弃")
+
+            if applied:
+                cur.execute(
+                    f"UPDATE {TABLE_CONTROL} SET revision = revision + 1, update_time = %s "
+                    "WHERE user_id = %s",
+                    (now, user_id),
+                )
+            conn.commit()
+            return STATUS_WRITTEN if applied else STATUS_NOOP
+    except MySQLError as e:
+        logger.warning(f"[LTM] 治理提交失败（数据库错误）：user={user_id}，原因：{str(e)[:200]}")
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[LTM] 治理提交失败：user={user_id}，原因：{str(e)[:200]}")
+        return None

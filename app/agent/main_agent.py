@@ -20,7 +20,7 @@ from deepagents.profiles import (
 from langgraph.errors import GraphRecursionError
 
 from app.agent.llm import model
-from app.agent.middleware.memory_compaction_middleware import build_compaction_middleware
+from app.agent.middleware.memory_stack import build_memory_middleware_stack
 from app.agent.middleware.subagent_report_middleware import SubAgentReportMiddleware
 from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.agent.middleware.user_memory_middleware import UserMemoryMiddleware
@@ -108,8 +108,10 @@ _COMPACT_ENABLED = memory_config.compact_enabled
 _COMPACTION_EXCLUDED = (
     frozenset({"SummarizationMiddleware"}) if _COMPACT_ENABLED else frozenset()
 )
-# 工厂要以 callable 本体传入：包成元组会被当成「元素是函数的序列」，函数对象直接进栈
-_COMPACTION_EXTRA = build_compaction_middleware if _COMPACT_ENABLED else ()
+# 工厂要以 callable 本体传入：包成元组会被当成「元素是函数的序列」，函数对象直接进栈。
+# 栈内顺序（裁剪 -> 摘要）由 memory_stack 负责：无损手段必须排在有损手段的外层。
+_MEMORY_STACK_ENABLED = memory_config.trim_enabled or memory_config.compact_enabled
+_COMPACTION_EXTRA = build_memory_middleware_stack if _MEMORY_STACK_ENABLED else ()
 
 register_harness_profile(
     "openai",

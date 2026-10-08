@@ -69,6 +69,11 @@ DEFAULT_CONV_TTL_S = 3600
 DEFAULT_SUMMARY_KEY_PREFIX = "dsa:summary:"
 DEFAULT_SUMMARY_TTL_S = 7 * 24 * 3600
 
+# ---- 工具结果裁剪----
+# 白名单：只裁这些工具的历史结果。两者返回体量最大，且旧轮次的结论已被后续轮次吸收；
+# 不裁 generate_markdown / convert_md_to_pdf / flush_memory —— 它们本来的返回就很短。
+DEFAULT_TRIM_TOOL_WHITELIST = ("task", "read_file_content")
+
 # ---- 长期记忆----
 # 注入块缓存与摘要/热窗口分域
 DEFAULT_LTM_KEY_PREFIX = "dsa:ltm:"
@@ -107,6 +112,9 @@ DERIVED_FIELD_NAMES = (
     "ltm_key_prefix",
     "ltm_ttl_s",
     "ltm_cache_enabled",
+    "trim_enabled",
+    "trim_tool_whitelist",
+    "consolidation_enabled",
 )
 
 
@@ -119,6 +127,15 @@ def _env_int(name: str, default: int) -> int:
         return int(str(raw).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _env_list(name: str, default: tuple) -> tuple:
+    """读取逗号分隔的列表型环境变量；缺失 / 空白一律回退默认（不抛）"""
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    items = tuple(item.strip() for item in str(raw).split(",") if item.strip())
+    return items or default
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -163,6 +180,9 @@ class MemoryConfig:
     ltm_key_prefix: str  # 注入块缓存 key 前缀
     ltm_ttl_s: int  # 注入块缓存 TTL，秒；<=0 表示不过期
     ltm_cache_enabled: bool  # 注入块缓存开关
+    trim_enabled: bool  # 工具结果裁剪总开关
+    trim_tool_whitelist: tuple  # 可裁剪的工具名（白名单外的历史结果一律不动）
+    consolidation_enabled: bool  # 容量治理总开关（受限合并 + 淘汰）
 
 
 def _build() -> MemoryConfig:
@@ -210,6 +230,9 @@ def _build() -> MemoryConfig:
         or DEFAULT_LTM_KEY_PREFIX,
         ltm_ttl_s=_env_int("MEMORY_LTM_TTL_S", DEFAULT_LTM_TTL_S),
         ltm_cache_enabled=_env_bool("MEMORY_LTM_CACHE_ENABLE", True),
+        trim_enabled=_env_bool("MEMORY_TRIM_ENABLE", True),
+        trim_tool_whitelist=_env_list("MEMORY_TRIM_TOOLS", DEFAULT_TRIM_TOOL_WHITELIST),
+        consolidation_enabled=_env_bool("MEMORY_CONSOLIDATION_ENABLE", True),
     )
 
 

@@ -20,6 +20,10 @@ STATUS_CONFLICT = "CONFLICT"  # 双校验未通过，本批作废
 # 已结算（可据此推算水位）的状态集合
 SETTLED_STATUSES = (STATUS_WRITTEN, STATUS_NOOP, STATUS_DROPPED)
 
+# ---- 事实来源：容量淘汰排序要用（FLUSH 殿后） ----
+SOURCE_FLUSH = "FLUSH"  # 用户通过整理工具主动要求记住的
+SOURCE_BATCH = "BATCH"  # 后台批抽出来的
+
 # ---- 仲裁决策类型 ----
 DECISION_ADD = "ADD"  # 新增事实
 DECISION_SUPERSEDE = "SUPERSEDE"  # 新事实取代旧事实（旧行 superseded_by 指向新行）
@@ -43,6 +47,7 @@ class MemoryItem:
     id: Optional[int]
     user_id: str
     content: str
+    source_kind: str = SOURCE_BATCH
     source_session_id: Optional[str] = None
     source_from: Optional[str] = None
     source_to: Optional[str] = None
@@ -56,8 +61,6 @@ class SourceRange:
     """
     一批素材的消息区间
 
-    `from_message_id` / `to_message_id` 是 `messages` 集合的 ObjectId 字符串：
-    用 ObjectId 而不是 `ts` 作水位，是因为同一秒内可能写入多条，`ts` 不严格递增。
     """
 
     from_message_id: str

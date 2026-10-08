@@ -10,6 +10,6 @@
 L3 的内容量与对话长度无关（抽取只取用户消息），因此三层叠加不会互相膨胀。
 """
 
-from app.core.memory.long_term import models, render, repository
+from app.core.memory.long_term import consolidation, models, render, repository
 
-__all__ = ["models", "render", "repository"]
+__all__ = ["models", "render", "repository", "consolidation"]
