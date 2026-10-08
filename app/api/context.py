@@ -23,6 +23,11 @@ _user_id_ctx: ContextVar[Optional[str]] = ContextVar(
     "user_id",
     default=None,
 )
+# 长期记忆块：任务开始时预读一次的渲染结果（空串表示本次不注入）
+_memory_block_ctx: ContextVar[Optional[str]] = ContextVar(
+    "memory_block",
+    default=None,
+)
 
 
 def set_session_context(path: str) -> Token[Optional[str]]:
@@ -82,10 +87,30 @@ def get_user_context() -> Optional[str]:
     return _user_id_ctx.get()
 
 
+def set_memory_block_context(block: Optional[str]) -> Token[Optional[str]]:
+    """
+    设置本次任务的长期记忆块（注入中间件读取；空串表示不注入）
+
+    :param block: 渲染好的注入块文本
+    :return: reset 时需要使用的上下文 token
+    """
+    return _memory_block_ctx.set(block)
+
+
+def get_memory_block_context() -> Optional[str]:
+    """
+    获取本次任务的长期记忆块
+
+    :return: 注入块文本；未设置或本次无记忆时返回 None / 空串
+    """
+    return _memory_block_ctx.get()
+
+
 def reset_session_context(
     session_token: Token[Optional[str]],
     thread_token: Optional[Token[Optional[str]]] = None,
     user_token: Optional[Token[Optional[str]]] = None,
+    memory_token: Optional[Token[Optional[str]]] = None,
 ) -> None:
     """
     恢复请求上下文，避免本次任务信息残留到后续请求
@@ -93,9 +118,12 @@ def reset_session_context(
     :param session_token: set_session_context 返回的 token
     :param thread_token: set_thread_context 返回的 token
     :param user_token: set_user_context 返回的 token
+    :param memory_token: set_memory_block_context 返回的 token
     """
     _session_dir_ctx.reset(session_token)
     if thread_token is not None:
         _thread_id_ctx.reset(thread_token)
     if user_token is not None:
         _user_id_ctx.reset(user_token)
+    if memory_token is not None:
+        _memory_block_ctx.reset(memory_token)

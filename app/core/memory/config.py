@@ -14,6 +14,9 @@
     | 后台抽取门槛        | 3 条                  | flush 工具不受此门槛挡          |
     | 保留工具循环        | 2 个                  | 保护窗口                        |
     | 摘要当前代缓存 TTL   | 7 天（固定）           | 过期会触发一次重算 |
+    | 单条事实上限        | 1/3 × 块上限           | 保证块里至少能装 3 条 |
+    | 单批抽取素材上限    | 40 条                  | 与参考项目一致 |
+    | 僵尸批次判定        | 10 分钟                | 回收会推水位，不能设太短 |
 
 """
 
@@ -66,6 +69,16 @@ DEFAULT_CONV_TTL_S = 3600
 DEFAULT_SUMMARY_KEY_PREFIX = "dsa:summary:"
 DEFAULT_SUMMARY_TTL_S = 7 * 24 * 3600
 
+# ---- 长期记忆----
+# 注入块缓存与摘要/热窗口分域
+DEFAULT_LTM_KEY_PREFIX = "dsa:ltm:"
+DEFAULT_LTM_TTL_S = 7 * 24 * 3600
+# 单条事实上限 = 1/3 × 块上限：块上限 1500 时单条 500，避免一条独占整个块
+LONG_TERM_ITEM_MAX_RATIO = 1 / 3
+# 单批素材上限与僵尸判定（固定量，不随预算变化）
+DEFAULT_EXTRACT_BATCH_MAX = 40
+DEFAULT_EXTRACT_ZOMBIE_TIMEOUT_S = 600
+
 # 派生量字段名清单：验证脚本按它打印/比对，避免"改了派生表但脚本没跟上"
 DERIVED_FIELD_NAMES = (
     "context_budget_chars",
@@ -86,6 +99,14 @@ DERIVED_FIELD_NAMES = (
     "compact_enabled",
     "summary_key_prefix",
     "summary_ttl_s",
+    "long_term_enabled",
+    "extract_enabled",
+    "long_term_item_max_chars",
+    "extract_batch_max",
+    "extract_zombie_timeout_s",
+    "ltm_key_prefix",
+    "ltm_ttl_s",
+    "ltm_cache_enabled",
 )
 
 
@@ -134,6 +155,14 @@ class MemoryConfig:
     compact_enabled: bool  # 摘要压缩总开关；关闭时回退到底座默认摘要
     summary_key_prefix: str  # 摘要当前代缓存 key 前缀
     summary_ttl_s: int  # 摘要当前代缓存 TTL，秒；<=0 表示不过期
+    long_term_enabled: bool  # 长期记忆总开关（注入 + 抽取 + 整理工具）
+    extract_enabled: bool  # 抽取开关：允许「只注入不抽取」
+    long_term_item_max_chars: int  # 单条事实上限（超长拒收，不截断）
+    extract_batch_max: int  # 单批素材条数上限
+    extract_zombie_timeout_s: int  # PROCESSING 批次判僵尸的秒数
+    ltm_key_prefix: str  # 注入块缓存 key 前缀
+    ltm_ttl_s: int  # 注入块缓存 TTL，秒；<=0 表示不过期
+    ltm_cache_enabled: bool  # 注入块缓存开关
 
 
 def _build() -> MemoryConfig:
@@ -172,6 +201,15 @@ def _build() -> MemoryConfig:
         summary_key_prefix=(os.getenv("MEMORY_SUMMARY_PREFIX") or "").strip()
         or DEFAULT_SUMMARY_KEY_PREFIX,
         summary_ttl_s=_env_int("MEMORY_SUMMARY_TTL_S", DEFAULT_SUMMARY_TTL_S),
+        long_term_enabled=_env_bool("MEMORY_LONG_TERM_ENABLE", True),
+        extract_enabled=_env_bool("MEMORY_EXTRACT_ENABLE", True),
+        long_term_item_max_chars=int(long_term_max * LONG_TERM_ITEM_MAX_RATIO),
+        extract_batch_max=DEFAULT_EXTRACT_BATCH_MAX,
+        extract_zombie_timeout_s=DEFAULT_EXTRACT_ZOMBIE_TIMEOUT_S,
+        ltm_key_prefix=(os.getenv("MEMORY_LTM_PREFIX") or "").strip()
+        or DEFAULT_LTM_KEY_PREFIX,
+        ltm_ttl_s=_env_int("MEMORY_LTM_TTL_S", DEFAULT_LTM_TTL_S),
+        ltm_cache_enabled=_env_bool("MEMORY_LTM_CACHE_ENABLE", True),
     )
 
 

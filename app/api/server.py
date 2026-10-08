@@ -32,6 +32,7 @@ from app.agent.main_agent import run_deep_agent
 from app.api.kb_doc_routes import router as kb_doc_router
 from app.api.kb_routes import router as kb_router
 from app.api.lifespan import lifespan
+from app.api.memory_routes import router as memory_router
 from app.api.monitor import manager
 from app.core.cancel import clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
@@ -49,6 +50,8 @@ app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 app.include_router(kb_router)
 # 知识库文档管理接口：
 app.include_router(kb_doc_router)
+# 长期记忆管理接口（查 / 删单条 / 清空，按 user_id 隔离）：
+app.include_router(memory_router)
 
 # 启动归一化：上次进程中断留下的 processing / reindexing 登记置为 failed。
 # 此时 indexed_hash 未被改写 → 重新触发 reindex 安全幂等。

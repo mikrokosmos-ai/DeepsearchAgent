@@ -44,6 +44,9 @@ services:
       - deepsearch_mysql_data:/var/lib/mysql
       # 只读挂载初始化 SQL，容器首次创建数据目录时会自动执行
       - ./mysql/mysql.sql:/docker-entrypoint-initdb.d/01-init-pharma.sql:ro
+      # 长期记忆独立库：同样只在首次创建数据目录时自动执行，
+      # 对已存在的 volume 需人工执行一次（见文件头部的命令）
+      - ./mysql/memory_tables.sql:/docker-entrypoint-initdb.d/02-init-memory.sql:ro
     healthcheck:
       test:
         [

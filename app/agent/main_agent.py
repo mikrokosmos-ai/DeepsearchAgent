@@ -23,6 +23,7 @@ from app.agent.llm import model
 from app.agent.middleware.memory_compaction_middleware import build_compaction_middleware
 from app.agent.middleware.subagent_report_middleware import SubAgentReportMiddleware
 from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
+from app.agent.middleware.user_memory_middleware import UserMemoryMiddleware
 from app.prompts.agent_loader import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
 from app.agent.subagents.general_purpose_agent import general_purpose_agent
@@ -30,6 +31,7 @@ from app.agent.subagents.local_knowledge_agent import local_knowledge_agent
 from app.agent.subagents.network_search_agent import network_search_agent
 from app.api.context import (
     reset_session_context,
+    set_memory_block_context,
     set_session_context,
     set_thread_context,
     set_user_context,
@@ -43,6 +45,10 @@ from app.core.memory.checkpointer import build_checkpointer
 from app.core.memory import conversation_repo
 # 记忆层阈值与开关：摘要接管是否启用由它决定
 from app.core.memory.config import memory_config
+# 长期记忆注入块：任务开始时预读一次，由注入中间件放进上行请求
+from app.core.memory.long_term import render as long_term_render
+# 长期记忆仓储：只为在落库前预建控制行（抽取下界）
+from app.core.memory.long_term import repository as long_term_repository
 # 知识库配图：与检索漏斗同一条「子图 state → 主智能体收尾」通道
 from app.core.knowledge_image_store import (
     clear_images as clear_knowledge_images,
@@ -70,6 +76,8 @@ from app.rag.repositories.history_repo import save_agent_message
 from app.rag.repositories.run_repo import save_agent_run
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
+# 长期记忆整理工具：无参数，只有「触发权」，记什么由服务端仲裁
+from app.tools.memory_flush_tool import flush_memory
 from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
 from app.tools.upload_file_read_tool import read_file_content
@@ -120,9 +128,10 @@ register_harness_profile(
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
-    tools=[generate_markdown, convert_md_to_pdf, read_file_content],
-    # 会话级次数护栏：管 `task`（派发子智能体）的总量与单助手额度
-    middleware=[ToolBudgetMiddleware(), SubAgentReportMiddleware()],
+    tools=[generate_markdown, convert_md_to_pdf, read_file_content, flush_memory],
+    # 会话级次数护栏：管 `task`（派发子智能体）的总量与单助手额度；
+    # 注入中间件只改上行请求（记忆块不落库），见 app/agent/middleware/user_memory_middleware.py
+    middleware=[ToolBudgetMiddleware(), SubAgentReportMiddleware(), UserMemoryMiddleware()],
     checkpointer=build_checkpointer(),
     subagents=[
         general_purpose_agent,
@@ -134,6 +143,37 @@ main_agent = create_deep_agent(
 
 # 会话工作区与上传暂存的目录契约统一由 app.core.runtime_paths 提供，
 # 本模块只消费 resolve_session_dir() / UPDATED_SESSIONS_DIR，不再自行拼接路径。
+
+
+def _ensure_long_term_control(user_id):
+    """
+    确保该用户的长期记忆控制行存在
+
+    必须在用户消息落库之前用：控制行的 create_time就是抽取下界，
+    建晚一步，该用户的第一条消息会永久落在下界之前（漏抽）。
+    """
+    if not user_id or not memory_config.long_term_enabled:
+        return
+    try:
+        long_term_repository.ensure_control_row(user_id)
+    except Exception as e:  # noqa: BLE001  长期记忆的任何故障都不许影响对话
+        logger.warning(f"[LTM] 控制行预建失败（不影响本次对话）：{str(e)[:160]}")
+
+
+def _load_memory_block(user_id):
+    """
+    预读长期记忆块（任务级一次）
+
+    读不到（未启用 / 无 user_id / 库不可用）一律返回空串：注入中间件据此跳过注入，
+    长期记忆的任何故障都不许影响主链路。
+    """
+    if not user_id or not memory_config.long_term_enabled:
+        return ""
+    try:
+        return long_term_render.get_block(user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[LTM] 长期记忆块预读失败（本次不注入）：{str(e)[:160]}")
+        return ""
 
 
 async def _build_history_messages(config, session_id):
@@ -215,6 +255,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     session_id_token = set_thread_context(session_id)
     # 用户身份同样是请求级横切信息：落库时由会话仓储直接取，不必逐层透传
     user_id_token = set_user_context(user_id)
+    # 长期记忆块：任务级预读一次（Redis 缓存优先，miss 才回源独立库）。
+    # 放这里而不是中间件里 —— 中间件是单例，实例字段会被并发请求串台。
+    memory_block_token = set_memory_block_context(_load_memory_block(user_id))
 
     # 前端拿到工作目录后，可以展示本次任务生成的 Markdown/PDF 等产物
     monitor.report_session_dir(session_dir_str)
@@ -251,6 +294,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         # L1 必须在「本轮用户消息落库之前」组装：否则刚写入的本轮会被当成历史，
         # 与下面 payload 里的本轮一起进上下文，同一句话出现两遍。
         history_messages = await _build_history_messages(config, session_id)
+
+        # 控制行必须在「首条用户消息落库之前」建好，否则该用户的第一条消息会漏抽
+        _ensure_long_term_control(user_id)
 
         # 把用户提问落库，使刷新/断线后仍能看到完整问答（写入失败不影响任务）
         save_agent_message(session_id, "user", task_query)
@@ -342,7 +388,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         monitor.report_custom("error", f"执行主智能发生异常信息：{str(e)}")
     finally:
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
-        reset_session_context(session_dir_token, session_id_token, user_id_token)
+        reset_session_context(
+            session_dir_token, session_id_token, user_id_token, memory_block_token
+        )
         # 清理协作式取消标志，避免内存态随会话数累积
         clear_cancel(session_id)
         # clear_budgets / clear_tool_failures / clear_subagent_reports 会把本次任务的

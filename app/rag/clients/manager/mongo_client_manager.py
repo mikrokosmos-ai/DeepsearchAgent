@@ -79,6 +79,9 @@ class HistoryMongoTool:
         # 消息的两条读取路径：按「会话 + 层」取窗口；按会话整体回读
         self.message.create_index([("session_id", 1), ("layer", 1), ("ts", -1)])
         self.message.create_index([("session_id", 1), ("ts", -1)])
+        # 长期记忆抽取的访问路径：按用户跨会话扫用户消息。
+        # 缺这条索引时该查询只能全表扫 —— 新功能带来的新访问路径必须配索引。
+        self.message.create_index([("user_id", 1), ("layer", 1), ("ts", 1)])
         # 审计按「会话 + 代数」定位，代数唯一是为了防止同一代被重复写入
         self.context_compaction.create_index([("session_id", 1), ("generation", 1)], unique=True)
 
