@@ -114,11 +114,6 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
     """
     查询指定会话的最近 N 条对话记录，返回清洗后的字典列表（不含 Mongo 内部字段）
 
-    阶段 2 起本函数已是**旧集合只读入口**：新写入一律落统一会话集合（messages），
-    生产链路（RAG 指代消解）已改走 app.core.memory.conversation_repo。
-    保留原实现不重定向，是因为既有回归脚本以此为「字段投影保证」的锚点
-    （见 scripts/verify_nested_checkpoint_isolation.py 第 3 节），改动它等于顺手改契约。
-
     :param session_id: 会话唯一标识，用于筛选指定会话的记录
     :param limit: 条数限制，默认返回最近 10 条
     :return: 对话记录列表（字典格式），查询失败返回空列表
