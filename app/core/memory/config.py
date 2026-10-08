@@ -13,6 +13,7 @@
     | 合并停手水位        | 75% × 块上限           | 兼任淘汰硬下限                  |
     | 后台抽取门槛        | 3 条                  | flush 工具不受此门槛挡          |
     | 保留工具循环        | 2 个                  | 保护窗口                        |
+    | 摘要当前代缓存 TTL   | 7 天（固定）           | 过期会触发一次重算 |
 
 """
 
@@ -59,6 +60,12 @@ DEFAULT_CONV_KEY_PREFIX = "dsa:conv:"
 # 过期只影响一次回源，不影响正确性（Mongo 是权威）
 DEFAULT_CONV_TTL_S = 3600
 
+# ---- 摘要当前代缓存 ----
+# 与 checkpointer / 热窗口分域；默认 7 天—— 摘要是被压缩掉原文的替代物，
+# 过期不只是多一次回源，而是触发一次「重新调模型压缩」，故留得比热窗口长得多
+DEFAULT_SUMMARY_KEY_PREFIX = "dsa:summary:"
+DEFAULT_SUMMARY_TTL_S = 7 * 24 * 3600
+
 # 派生量字段名清单：验证脚本按它打印/比对，避免"改了派生表但脚本没跟上"
 DERIVED_FIELD_NAMES = (
     "context_budget_chars",
@@ -76,6 +83,9 @@ DERIVED_FIELD_NAMES = (
     "conv_key_prefix",
     "conv_ttl_s",
     "conv_cache_enabled",
+    "compact_enabled",
+    "summary_key_prefix",
+    "summary_ttl_s",
 )
 
 
@@ -121,6 +131,9 @@ class MemoryConfig:
     conv_key_prefix: str  # 会话消息热窗口 key 前缀
     conv_ttl_s: int  # 热窗口 key TTL，秒；<=0 表示不过期
     conv_cache_enabled: bool  # 热窗口总开关；关闭时全部回源 Mongo
+    compact_enabled: bool  # 摘要压缩总开关；关闭时回退到底座默认摘要
+    summary_key_prefix: str  # 摘要当前代缓存 key 前缀
+    summary_ttl_s: int  # 摘要当前代缓存 TTL，秒；<=0 表示不过期
 
 
 def _build() -> MemoryConfig:
@@ -155,6 +168,10 @@ def _build() -> MemoryConfig:
         conv_key_prefix=(os.getenv("MEMORY_CONV_PREFIX") or "").strip() or DEFAULT_CONV_KEY_PREFIX,
         conv_ttl_s=_env_int("MEMORY_CONV_TTL_S", DEFAULT_CONV_TTL_S),
         conv_cache_enabled=_env_bool("MEMORY_CONV_CACHE_ENABLE", True),
+        compact_enabled=_env_bool("MEMORY_COMPACT_ENABLE", True),
+        summary_key_prefix=(os.getenv("MEMORY_SUMMARY_PREFIX") or "").strip()
+        or DEFAULT_SUMMARY_KEY_PREFIX,
+        summary_ttl_s=_env_int("MEMORY_SUMMARY_TTL_S", DEFAULT_SUMMARY_TTL_S),
     )
 
 

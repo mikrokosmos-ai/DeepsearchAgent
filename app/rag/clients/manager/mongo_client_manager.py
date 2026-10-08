@@ -25,10 +25,13 @@ AGENT_RUN_COLLECTION = "agent_run"
 # MD 是唯一事实源，本集合只登记元数据，不存正文。
 KB_DOC_COLLECTION = "kb_document"
 
-# 统一会话模型（阶段 2）：conversations 一行一个会话，messages 一行一条消息。
+# 统一会话模型：conversations 一行一个会话，messages 一行一条消息。
 # 旧集合 chat_message / agent_message 保留为只读兜底，不再写入。
 CONVERSATION_COLLECTION = "conversations"
 MESSAGE_COLLECTION = "messages"
+
+# 摘要压缩审计集合名：每生成一代摘要追加一行，记录素材条数、压缩前后字符与摘要正文。
+CONTEXT_COMPACTION_COLLECTION = "context_compaction"
 
 
 class HistoryMongoTool:
@@ -59,6 +62,8 @@ class HistoryMongoTool:
         # 统一会话模型（新写入目标）
         self.conversation = self.db[CONVERSATION_COLLECTION]
         self.message = self.db[MESSAGE_COLLECTION]
+        # 摘要压缩审计（只写不读；当前代摘要有独立的热缓存）
+        self.context_compaction = self.db[CONTEXT_COMPACTION_COLLECTION]
 
         # 复合索引：session_id 升序 + ts 降序，匹配「按会话取最新消息」这一核心查询
         self.chat_message.create_index([("session_id", 1), ("ts", -1)])
@@ -74,6 +79,8 @@ class HistoryMongoTool:
         # 消息的两条读取路径：按「会话 + 层」取窗口；按会话整体回读
         self.message.create_index([("session_id", 1), ("layer", 1), ("ts", -1)])
         self.message.create_index([("session_id", 1), ("ts", -1)])
+        # 审计按「会话 + 代数」定位，代数唯一是为了防止同一代被重复写入
+        self.context_compaction.create_index([("session_id", 1), ("generation", 1)], unique=True)
 
         logger.info(f"MongoDB 连接成功：{self.db_name}")
 

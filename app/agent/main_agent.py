@@ -20,6 +20,7 @@ from deepagents.profiles import (
 from langgraph.errors import GraphRecursionError
 
 from app.agent.llm import model
+from app.agent.middleware.memory_compaction_middleware import build_compaction_middleware
 from app.agent.middleware.subagent_report_middleware import SubAgentReportMiddleware
 from app.agent.middleware.tool_budget_middleware import ToolBudgetMiddleware
 from app.prompts.agent_loader import main_agent_content
@@ -40,6 +41,8 @@ from app.core.logger import logger
 from app.core.memory.checkpointer import build_checkpointer
 # 统一会话消息层：L0（图状态）为空时用它补齐上下文，见 _build_history_messages
 from app.core.memory import conversation_repo
+# 记忆层阈值与开关：摘要接管是否启用由它决定
+from app.core.memory.config import memory_config
 # 知识库配图：与检索漏斗同一条「子图 state → 主智能体收尾」通道
 from app.core.knowledge_image_store import (
     clear_images as clear_knowledge_images,
@@ -92,11 +95,21 @@ def _recursion_limit() -> int:
         return DEFAULT_RECURSION_LIMIT
 
 # 一次性注册本项目的运行时策略（键用 provider，避免 .env 里模型改名后静默失配）：
+# 摘要压缩是「排除底座实例 + 补上本项目实例」的成对改法；开关关闭时两项一起撤，整体回退到底座默认，不留主栈与子栈口径不一致的中间态。
+_COMPACT_ENABLED = memory_config.compact_enabled
+_COMPACTION_EXCLUDED = (
+    frozenset({"SummarizationMiddleware"}) if _COMPACT_ENABLED else frozenset()
+)
+# 工厂要以 callable 本体传入：包成元组会被当成「元素是函数的序列」，函数对象直接进栈
+_COMPACTION_EXTRA = build_compaction_middleware if _COMPACT_ENABLED else ()
+
 register_harness_profile(
     "openai",
     HarnessProfile(
         general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
         excluded_tools=VIRTUAL_FS_TOOLS,
+        excluded_middleware=_COMPACTION_EXCLUDED,
+        extra_middleware=_COMPACTION_EXTRA,
     ),
 )
 
