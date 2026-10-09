@@ -2,11 +2,16 @@ import sys
 from app.rag.conf.import_pipeline_config import import_pipeline_config
 from app.rag.pipelines.import_pipeline.state import ImportGraphState
 from app.rag.clients.embedding_client import generate_embeddings
+from app.rag.utils.embedding_text import render_embedding_text
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
 
 # 切片向量化的批大小
 EMBEDDING_BATCH_SIZE = import_pipeline_config.embedding_batch_size
+# 送入向量的文本模板（外置配置；改它等于改向量口径）
+EMBEDDING_TEMPLATE = import_pipeline_config.embedding_template
+# 模板里章节路径取末几级标题
+EMBEDDING_SECTION_LEVELS = import_pipeline_config.embedding_section_levels
 
 
 @step_log("step_1_validate_chunks")
@@ -26,7 +31,7 @@ def step_2_embedding_chunks(chunks):
     """
     为了给chunks生成向量
        1. 批量生成
-       2. 增强生成 item_name + content
+       2. 增强生成：模板渲染（主体名 + 章节路径 + 正文），模板走配置
        3. 批量防止异常全体报错
     """
     # 1. 数据准备工作
@@ -39,9 +44,11 @@ def step_2_embedding_chunks(chunks):
             step_chunks = chunks[index:index + step]
             vectorx_str_list = []
             for item in step_chunks:
-                item_name = item['item_name']
-                content = item['content']
-                item_str = f"主体:{item_name},内容:{content}" if item_name else content
+                item_str = render_embedding_text(
+                    item,
+                    template=EMBEDDING_TEMPLATE,
+                    section_levels=EMBEDDING_SECTION_LEVELS,
+                )
                 vectorx_str_list.append(item_str)
             # 生成向量
             result = generate_embeddings(vectorx_str_list)
@@ -50,6 +57,8 @@ def step_2_embedding_chunks(chunks):
                 chunk_new = chunk.copy()
                 chunk_new['dense_vector'] = result['dense'][i]
                 chunk_new['sparse_vector'] = result['sparse'][i]
+                # 落库留存的就是上面那串同一个变量：不二次渲染，口径天然逐字一致
+                chunk_new['embedding_text'] = vectorx_str_list[i]
                 chunks_vector.append(chunk_new)
         except Exception as e:
             logger.warning(f"index= {index}步骤,发生错误,跳过,继续生成向量!!,错误信息:{str(e)}")

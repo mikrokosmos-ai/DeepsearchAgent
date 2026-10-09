@@ -44,6 +44,10 @@ def step_2_prepare_collection():
         schema.add_field(field_name="parent_title", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="part", datatype=DataType.INT8)
         schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=65535)
+        # 章节路径与「实际送入向量的文本」都落成静态字段：
+        # 前者供检索侧做元数据富化，后者让「送去算向量的是什么」有据可查、可复算
+        schema.add_field(field_name="section_path", datatype=DataType.VARCHAR, max_length=2048)
+        schema.add_field(field_name="embedding_text", datatype=DataType.VARCHAR, max_length=65535)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=1024)
         schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
 
@@ -90,9 +94,21 @@ def step_4_insert_datas(chunks):
        :return:  chunks -> 主键回显
     """
     milvus_client = get_milvus_client()
+    # 章节路径在 chunk 里是列表（chunks.json 保留结构），入向量库前归一成字符串：
+    # 列表进的是动态字段，动态字段不吃索引与过滤，落成静态 VARCHAR 才能被回读与富化
+    rows = []
+    for chunk in chunks:
+        row = dict(chunk)
+        path = row.get("section_path")
+        if isinstance(path, list):
+            row["section_path"] = " / ".join(str(item) for item in path)
+        row.setdefault("section_path", "")
+        row.setdefault("embedding_text", "")
+        rows.append(row)
+
     result = milvus_client.insert(
         collection_name=CHUNKS_COLLECTION_NAME,
-        data=chunks
+        data=rows
     )
     insert_count = result.get("insert_count", 0)
     logger.info(f"插入数据成功! 总条数:{insert_count}")

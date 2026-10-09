@@ -1,19 +1,35 @@
 import sys
 import json
 import os
-import re
 from pathlib import Path
 from typing import Tuple, List, Dict
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.rag.conf.import_pipeline_config import import_pipeline_config
 from app.core.logger import logger, node_log, step_log
 from app.rag.pipelines.import_pipeline.state import ImportGraphState
+from app.rag.utils.chunk_blocks import (
+    BLOCK_CODE,
+    BLOCK_IMAGE,
+    BLOCK_LIST,
+    BLOCK_TABLE,
+    BLOCK_TEXT,
+    Block,
+    chunk_row,
+    list_batches,
+    section_prefix,
+    slice_blocks,
+    table_batches,
+)
 from app.utils.task_utils import add_running_task, add_done_task
 
 CHUNK_MAX_SIZE = import_pipeline_config.chunk_max_size  # 500 触发二次切割
 CHUNK_SIZE = import_pipeline_config.chunk_size  # 单块长度
 CHUNK_OVERLAP = import_pipeline_config.chunk_overlap  # 块间重叠
 CHUNK_MIN_SIZE = import_pipeline_config.chunk_min_size  # 最小块长度
+# 章节路径取末几级标题（模板与正文前缀共用同一口径，保证长短块一致）
+SECTION_LEVELS = import_pipeline_config.embedding_section_levels
+# 表格超长分批时每批最多带多少数据行
+TABLE_MAX_ROWS = import_pipeline_config.chunk_table_max_rows
 
 
 @step_log("step_1_validate_clean")
@@ -50,140 +66,122 @@ def step_1_validate_clean(state) -> Tuple[str, str]:
     return md_content, file_title
 
 
-@step_log("step_2_split_by_title")
-def step_2_split_by_title(md_content, file_title) -> List[Dict[str, str]]:
+@step_log("step_2_slice_blocks")
+def step_2_slice_blocks(md_content, file_title) -> List[Block]:
     """
-        语义切割,根据标题,进行内容切割!
-        :return: [{content,title,file_title}]
+    语义切割：按标题切 + 按块类型分组（表格 / 代码 / 列表 / 图片 / 普通段落各自成块）
+
+    标题栈全量维护，每个块都带上完整章节路径 —— 它既是元数据字段的来源，
+    也是长块补前缀的依据（旧实现只在「父标题没正文」时才会把标题带下去）。
     """
-    #1. 定义正则
-    rep = re.compile(r"^\s*#{1,6}\s+.+")
-    #2. 根据\n进行行的切割
-    lines = md_content.split("\n")
-    #3. 准备一些数据容器
-    chunks = []
-    current_title = ""
-    current_lines = []
-    pending_titles = []
-    is_code_block = False
-    title_count = 0
-
-    #4. 循环处理每行数据
-    for line in lines:
-        strip_line = line.strip()
-        #5. 检查代码块进出
-        if strip_line.startswith('```') or strip_line.startswith('~~~'):
-            is_code_block = not is_code_block
-            current_lines.append(line)
-            continue
-
-        #6. 判断是不是标题
-        if re.match(rep, strip_line) and not is_code_block:
-            if current_title:
-                if current_lines:
-                    head = "\n".join(pending_titles + [current_title])
-                    body = "\n".join(current_lines)
-                    chunks.append({
-                        "content": f"{head}\n{body}",
-                        "title": current_title,
-                        "file_title": file_title,
-                    })
-                    pending_titles = []
-                else:
-                    pending_titles.append(current_title)
-            else:
-                if any(ln.strip() for ln in current_lines):
-                    chunks.append({
-                        "content": "\n".join(current_lines),
-                        "title": file_title,
-                        "file_title": file_title,
-                    })
-            current_title = strip_line
-            current_lines = []
-            title_count += 1
-        else:
-            current_lines.append(line)
-
-    #8. 处理最后一个标题
-    if current_title:
-        if current_lines:
-            head = "\n".join(pending_titles + [current_title])
-            body = "\n".join(current_lines)
-            chunks.append({
-                "content": f"{head}\n{body}",
-                "title": current_title,
-                "file_title": file_title
-            })
-            pending_titles = []
-
-    #9. 没有标题的文档
-    if title_count == 0:
-        chunks.append({
-            "content": md_content,
-            "title": "default",
-            "file_title": file_title
-        })
-        title_count = 1
-    #10.返回结果
-    logger.info(f"完成语义切割,切块数量:{len(chunks)},内容:{chunks[:3]}")
-    return chunks
+    blocks = slice_blocks(md_content, file_title)
+    counts: Dict[str, int] = {}
+    for block in blocks:
+        counts[block.block_type] = counts.get(block.block_type, 0) + 1
+    logger.info(f"完成语义切割,块数量:{len(blocks)},按类型:{counts}")
+    return blocks
 
 
-@step_log("step_3_data_refine_chunk")
-def step_3_data_refine_chunk(chunks) -> List[Dict[str, str]]:
+@step_log("step_3_blocks_to_chunks")
+def step_3_blocks_to_chunks(blocks: List[Block], file_title: str) -> List[Dict]:
     """
-       作用: 将超过执行size的标题内容,进行二次切分,二次切分产生: parent_title part
+    按块类型分发处理：
+
+        表格   整表成块；超长时按行分批且**每批都重复表头**（数据行不丢不重）
+        代码   不切（切断代码块等于毁掉可读性），超长只告警
+        列表   尽量整段保留，真超长才按条目边界分批
+        图片   与其所在段落一起整块保留
+        段落   沿用递归切割器二次切；每片都补上章节路径前缀，长短块口径一致
     """
-    #1. 定义langchain提供的递归切割器
     splitter = RecursiveCharacterTextSplitter(
         separators=["\n\n", "\n", "。", "！", "；", " ", ""],
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP
     )
-    #2. 获取原来的chunks
-    final_chunks = []
-    for chunk in chunks:
-        content = chunk['content']
-        if len(content) > CHUNK_MAX_SIZE:
-            #4. 超过阈值 -> 递归切割器 二次切割
-            spliter_chunks = splitter.split_text(content)
-            for text in spliter_chunks:
-                if len(text) > CHUNK_MAX_SIZE:
-                    logger.warning(f"切分后仍存在超长块(len={len(text)}),请检查 chunk_size 配置!")
-            for index, text in enumerate(spliter_chunks, start=1):
-                final_chunks.append({
-                    "content": text,
-                    "title": f'{chunk["title"]}_{index}',
-                    "file_title": chunk["file_title"],
-                    "part": index,
-                    "parent_title": chunk["title"]
-                })
+    chunks: List[Dict] = []
+
+    for block in blocks:
+        prefix = section_prefix(block.section_path, SECTION_LEVELS)
+        head = f"{prefix}\n" if prefix else ""
+        body = "\n".join(block.lines)
+        budget = max(1, CHUNK_MAX_SIZE - len(head))
+
+        if block.block_type == BLOCK_CODE:
+            if len(head) + len(body) > CHUNK_MAX_SIZE:
+                logger.warning(
+                    f"代码块超过 CHUNK_MAX_SIZE({CHUNK_MAX_SIZE})，按设计保持整块不切："
+                    f"len={len(head) + len(body)}，title={block.title!r}"
+                )
+            chunks.append(chunk_row(head + body, block, file_title, 0))
+            continue
+
+        if block.block_type == BLOCK_TABLE:
+            if len(head) + len(body) <= CHUNK_MAX_SIZE:
+                chunks.append(chunk_row(head + body, block, file_title, 0))
+            else:
+                for part, batch in enumerate(
+                    table_batches(block.lines, TABLE_MAX_ROWS, budget), start=1
+                ):
+                    chunks.append(chunk_row(head + "\n".join(batch), block, file_title, part))
+            continue
+
+        if block.block_type == BLOCK_LIST:
+            if len(head) + len(body) <= CHUNK_MAX_SIZE:
+                chunks.append(chunk_row(head + body, block, file_title, 0))
+            else:
+                for part, batch in enumerate(list_batches(block.lines, budget), start=1):
+                    chunks.append(chunk_row(head + "\n".join(batch), block, file_title, part))
+            continue
+
+        if block.block_type == BLOCK_IMAGE:
+            chunks.append(chunk_row(head + body, block, file_title, 0))
+            continue
+
+        # 普通段落：短块整段留，长块二次切
+        if len(head) + len(body) <= CHUNK_MAX_SIZE:
+            chunks.append(chunk_row(head + body, block, file_title, 0))
         else:
-            chunk['part'] = 0
-            chunk['parent_title'] = chunk['title']
-            final_chunks.append(chunk)
-    return final_chunks
+            pieces = splitter.split_text(body)
+            for part, piece in enumerate(pieces, start=1):
+                if len(piece) > CHUNK_MAX_SIZE:
+                    logger.warning(
+                        f"切分后仍存在超长块(len={len(piece)}),请检查 chunk_size 配置!"
+                    )
+                chunks.append(chunk_row(head + piece, block, file_title, part))
+
+    logger.info(f"分块完成,chunk 数:{len(chunks)}")
+    return chunks
 
 
 @step_log("step_4_merge_small_chunks")
-def step_4_merge_small_chunks(chunks) -> List[Dict[str, str]]:
+def step_4_merge_small_chunks(chunks) -> List[Dict]:
     """
-       作用: 将低于最小阈值的相邻碎块合并,避免切分过碎导致语义不完整
+    合并低于最小阈值的相邻碎块，避免切分过碎导致语义不完整
+
+    合并条件收紧到「同章节 + 同块类型」：跨章节合并会把两节的内容黏成一块，
+    检索到它时无法判断答案属于哪一节；跨类型合并（例如把表格并进段落）会毁掉
+    表格的整表语义。合并后 title 保持首块的标题（旧实现取后一块，是一处漂移）。
     """
-    merged_chunks = []
+    merged_chunks: List[Dict] = []
     accumulator = None
+
+    def mergeable(prev: Dict, nxt: Dict) -> bool:
+        return (
+            prev.get("section_path") == nxt.get("section_path")
+            and prev.get("block_type") == nxt.get("block_type")
+        )
 
     for chunk in chunks:
         if accumulator is None:
             accumulator = dict(chunk)
             continue
         acc_len = len(accumulator["content"])
-        if (accumulator["parent_title"] == chunk["parent_title"]
+        if (mergeable(accumulator, chunk)
                 and acc_len < CHUNK_MIN_SIZE
                 and acc_len + len(chunk["content"]) < CHUNK_MAX_SIZE):
             accumulator["content"] = f'{accumulator["content"]}\n{chunk["content"]}'
-            accumulator["title"] = chunk["title"]
-            accumulator["part"] = chunk["part"]
+            # part 取两者较大值：合并后覆盖到更靠后的位置，序号保持单调不回退
+            accumulator["part"] = max(accumulator.get("part", 0), chunk.get("part", 0))
         else:
             merged_chunks.append(accumulator)
             accumulator = dict(chunk)
@@ -191,7 +189,8 @@ def step_4_merge_small_chunks(chunks) -> List[Dict[str, str]]:
     if accumulator is not None:
         if (len(accumulator["content"]) < CHUNK_MIN_SIZE
                 and merged_chunks
-                and merged_chunks[-1]["parent_title"] == accumulator["parent_title"]):
+                and mergeable(merged_chunks[-1], accumulator)
+                and len(merged_chunks[-1]["content"]) + len(accumulator["content"]) < CHUNK_MAX_SIZE):
             prev = merged_chunks[-1]
             prev["content"] = f'{prev["content"]}\n{accumulator["content"]}'
         else:
@@ -217,10 +216,12 @@ def step_5_backup_data(chunks, md_path):
 """
 chunk结构说明：
     "file_title": 去后缀的MD文件名
-    "title": chunk标题
-    "parent_title": 父标题
-    "part": 部分数（0代表没有精切，其余数字代表精切后的第几部分）
-    "content": chunk内容
+    "title": 当前块所属标题（序号只进 part，不再写「原标题_序号」伪标题）
+    "parent_title": 与 title 同值（保留字段以兼容既有读取方）
+    "part": 0=未切分；>0=二次切分后的第几片
+    "section_path": 完整标题链（列表）
+    "block_type": 块类型 text/table/code/list/image
+    "content": chunk内容（长块子块的前缀是章节路径末两级，与向量模板同口径）
 """
 
 
@@ -234,11 +235,11 @@ def node_document_split(state: ImportGraphState) -> ImportGraphState:
     add_running_task(state['task_id'], sys._getframe().f_code.co_name, state.get("is_stream", False))
     # 2. 数据校验和清洗
     md_content, file_title = step_1_validate_clean(state)
-    # 3. 按照标题进行数据切割
-    chunks = step_2_split_by_title(md_content, file_title)
-    # 4. 二次细分切割
-    chunks = step_3_data_refine_chunk(chunks)
-    # 5. 合并小碎块
+    # 3. 按标题 + 块类型切块
+    blocks = step_2_slice_blocks(md_content, file_title)
+    # 4. 按块类型分发成 chunk（表格分批带表头 / 代码不切 / 长段落补章节前缀）
+    chunks = step_3_blocks_to_chunks(blocks, file_title)
+    # 5. 合并小碎块（同章节同类型）
     chunks = step_4_merge_small_chunks(chunks)
     # 6. 数据备份 chunks.json
     step_5_backup_data(chunks, state['md_path'])

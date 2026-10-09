@@ -33,6 +33,7 @@ class ImportPipelineConfig:
     chunk_size: int  # 二次切分时递归切割器的单块长度
     chunk_overlap: int  # 二次切分的块间重叠长度
     chunk_min_size: int  # 最小块长度，低于此值的相邻同源块会被合并
+    chunk_table_max_rows: int  # 表格超长分批时每批最多带多少数据行（表头每批都重复）
 
     # ==================== 商品主体识别（node_item_name_recognition）====================
     item_name_chunk_k: int  # 送入 LLM 的上下文切片条数
@@ -40,6 +41,8 @@ class ImportPipelineConfig:
 
     # ==================== 切片向量化（node_bge_embedding）====================
     embedding_batch_size: int  # 每次调用模型的批大小
+    embedding_template: str  # 送入向量的文本模板，占位符见 app/rag/utils/embedding_text.py
+    embedding_section_levels: int  # 模板/正文前缀取章节路径的末几级标题（0=不取）
 
     # ==================== 图片摘要限流（node_md_img）====================
     # 说明：VLM 调用有平台侧频率限制，此处为客户端主动节流，避免触发限流导致图片处理失败
@@ -56,11 +59,17 @@ import_pipeline_config = ImportPipelineConfig(
     chunk_size=int(os.getenv("CHUNK_SIZE", "200")),
     chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "20")),
     chunk_min_size=int(os.getenv("CHUNK_MIN_SIZE", "100")),
+    chunk_table_max_rows=int(os.getenv("CHUNK_TABLE_MAX_ROWS", "20")),
     # ---- 商品主体识别 ----
     item_name_chunk_k=int(os.getenv("ITEM_NAME_CHUNK_K", "5")),
     item_name_context_max_chars=int(os.getenv("ITEM_NAME_CONTEXT_MAX_CHARS", "2500")),
     # ---- 切片向量化 ----
     embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "5")),
+    # 「主体:{item_name},内容:{content}」并重导，不必改代码。
+    embedding_template=os.getenv(
+        "EMBEDDING_TEMPLATE", "章节路径:{section_path} | 主体:{item_name} | 内容:{content}"
+    ),
+    embedding_section_levels=int(os.getenv("EMBEDDING_SECTION_LEVELS", "2")),
     # ---- 图片摘要限流 ----
     image_summary_rate_max_requests=int(os.getenv("IMAGE_SUMMARY_RATE_MAX_REQUESTS", "9")),
     image_summary_rate_window_seconds=int(os.getenv("IMAGE_SUMMARY_RATE_WINDOW_SECONDS", "60")),
@@ -103,6 +112,10 @@ def _validate_import_pipeline_config(cfg: ImportPipelineConfig) -> None:
     # 4. 数值型参数必须为正
     if cfg.chunk_min_size < 0:
         raise ConfigurationError(f"配置非法：CHUNK_MIN_SIZE({cfg.chunk_min_size}) 不能为负数")
+    if cfg.chunk_table_max_rows <= 0:
+        raise ConfigurationError(
+            f"配置非法：CHUNK_TABLE_MAX_ROWS({cfg.chunk_table_max_rows}) 必须大于 0"
+        )
     if cfg.item_name_chunk_k <= 0:
         raise ConfigurationError(f"配置非法：ITEM_NAME_CHUNK_K({cfg.item_name_chunk_k}) 必须大于 0")
     if cfg.item_name_context_max_chars <= 0:
@@ -111,6 +124,15 @@ def _validate_import_pipeline_config(cfg: ImportPipelineConfig) -> None:
         )
     if cfg.embedding_batch_size <= 0:
         raise ConfigurationError(f"配置非法：EMBEDDING_BATCH_SIZE({cfg.embedding_batch_size}) 必须大于 0")
+    # 5. 模板必须带正文占位符：缺了它，正文就进不了向量，检索会整体失效且极难归因
+    if "{content}" not in cfg.embedding_template:
+        raise ConfigurationError(
+            f"配置非法：EMBEDDING_TEMPLATE 必须包含 {{content}} 占位符，当前值：{cfg.embedding_template!r}"
+        )
+    if cfg.embedding_section_levels < 0:
+        raise ConfigurationError(
+            f"配置非法：EMBEDDING_SECTION_LEVELS({cfg.embedding_section_levels}) 不能为负数"
+        )
     if cfg.image_summary_rate_max_requests <= 0 or cfg.image_summary_rate_window_seconds <= 0:
         raise ConfigurationError(
             f"配置非法：IMAGE_SUMMARY_RATE_MAX_REQUESTS({cfg.image_summary_rate_max_requests}) 与 "
