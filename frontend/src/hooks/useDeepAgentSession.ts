@@ -142,21 +142,36 @@ export function useDeepAgentSession() {
     [threadId]
   );
 
+  /**
+   * 切到指定会话
+   *
+   * 切换会话 = 换 thread_id + 清空一切「属于上一会话」的实时状态：不清就会把上一个
+   * 会话的轨迹、附件、答案带进新页面。WebSocket 会随 thread_id 变化自动重连。
+   */
+  const selectSession = useCallback(
+    (nextThreadId: string) => {
+      storeThreadId(nextThreadId);
+      setThreadId(nextThreadId);
+      setEvents([]);
+      setFiles([]);
+      setSessionPath("");
+      setResult("");
+      setNotices([]);
+      setLastError("");
+      setImageUrls([]);
+      clearUploadedAttachments();
+      setIsRunning(false);
+      setIsCancelling(false);
+    },
+    [clearUploadedAttachments]
+  );
+
+  /** 新建会话页：生成新 thread_id 并切过去，返回新标识供调用方登记会话索引 */
   const resetSession = useCallback(() => {
     const nextThreadId = createThreadId();
-    storeThreadId(nextThreadId);
-    setThreadId(nextThreadId);
-    setEvents([]);
-    setFiles([]);
-    setSessionPath("");
-    setResult("");
-    setNotices([]);
-    setLastError("");
-    setImageUrls([]);
-    clearUploadedAttachments();
-    setIsRunning(false);
-    setIsCancelling(false);
-  }, [clearUploadedAttachments]);
+    selectSession(nextThreadId);
+    return nextThreadId;
+  }, [selectSession]);
 
   const refreshFiles = useCallback(async () => {
     if (!sessionPath) {
@@ -453,6 +468,7 @@ export function useDeepAgentSession() {
     refreshFiles,
     resetSession,
     result,
+    selectSession,
     sessionPath,
     stats,
     cancelCurrentTask,

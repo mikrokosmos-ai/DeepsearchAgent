@@ -377,3 +377,92 @@ def count_messages(session_id: str, layer: Optional[str] = None) -> int:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[Memory] 统计会话消息失败：session={session_id}，原因：{e}")
         return 0
+
+# ======================================================================
+# 会话索引（列表页）与按会话清理
+# ======================================================================
+_CONVERSATION_PROJECTION = {
+    "_id": 0,
+    "session_id": 1,
+    "user_id": 1,
+    "title": 1,
+    "message_count": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+
+def list_conversations(
+    user_id: Optional[str] = None, limit: int = 100
+) -> List[Dict[str, Any]]:
+    """
+    列出会话索引，按更新时间倒序
+
+    索引由 append_message 的 upsert 维护（首条消息定标题、每条累加计数、每次刷新
+    updated_at），因此列表页不必扫消息集合。索引集合上已有 (user_id, updated_at) 索引。
+
+    user_id 过滤刻意带上「无归属」的历史行：本项目没有登录体系，user_id 由浏览器生成并
+    持久化，未带 user_id 的行只可能是同一台机器在身份透传补全之前写入的，把它们挡在
+    列表外会让老会话凭空消失。
+    """
+    try:
+        query: Dict[str, Any] = {}
+        if user_id:
+            query["$or"] = [
+                {"user_id": user_id},
+                {"user_id": None},
+                {"user_id": {"$exists": False}},
+            ]
+        cursor = (
+            get_history_mongo_tool()
+            .conversation.find(query, _CONVERSATION_PROJECTION)
+            .sort([("updated_at", -1)])
+            .limit(max(1, limit))
+        )
+        sessions: List[Dict[str, Any]] = []
+        for doc in cursor:
+            session_id = doc.get("session_id")
+            if not session_id:
+                continue
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "user_id": doc.get("user_id"),
+                    "title": doc.get("title") or "",
+                    "message_count": int(doc.get("message_count") or 0),
+                    "created_at": float(doc.get("created_at") or 0.0),
+                    "updated_at": float(doc.get("updated_at") or 0.0),
+                }
+            )
+        return sessions
+    except Exception as e:
+        logger.warning(f"[Memory] 列出会话失败（按空列表处理）：{e}")
+        return []
+
+
+def delete_session(session_id: str) -> Dict[str, int]:
+    """
+    删除该会话的对话数据：新集合的消息行与会话行 + 旧集合兜底行 + 热窗口
+
+    旧集合必须一起删：回源逻辑在「新集合为空」时会兜底读旧集合，
+    留下旧行等于「删了还在」。热窗口的失效不能省 —— 否则下一次读取命中缓存，
+    被删的消息会从缓存里复活（TTL 到期前一直可见）。
+
+    :return: 各类被删条数；单步失败只记 warning，由调用方决定如何呈现
+    """
+    removed = {"messages": 0, "legacy_agent": 0, "legacy_rag": 0, "conversation": 0}
+    if not session_id:
+        return removed
+    try:
+        mongo_tool = get_history_mongo_tool()
+        query = {"session_id": session_id}
+        removed["messages"] = mongo_tool.message.delete_many(query).deleted_count
+        removed["legacy_agent"] = mongo_tool.agent_message.delete_many(query).deleted_count
+        removed["legacy_rag"] = mongo_tool.chat_message.delete_many(query).deleted_count
+        removed["conversation"] = mongo_tool.conversation.delete_many(query).deleted_count
+    except Exception as e:
+        logger.warning(f"[Memory] 删除会话消息失败：session={session_id}，原因：{e}")
+
+    for layer in VALID_LAYERS:
+        _cache_invalidate(session_id, layer)
+    return removed

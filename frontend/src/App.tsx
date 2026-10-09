@@ -9,7 +9,6 @@ import {
   DatabaseOutlined,
   FileSearchOutlined,
   MessageOutlined,
-  MoreOutlined,
   PlusOutlined,
   SearchOutlined,
   ToolOutlined
@@ -22,9 +21,25 @@ import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
 import { ImportPage } from "./components/importer/ImportPage";
 import { KbManagerPage } from "./components/kbmanager/KbManagerPage";
+import { SessionRail } from "./components/SessionRail";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
+import {
+  deleteSession as deleteSessionApi,
+  fetchSessionHistory,
+  listSessions
+} from "./lib/api";
+import {
+  createSessionEntry,
+  loadSessionIndex,
+  mergeSessionIndex,
+  removeSessionEntry,
+  saveSessionIndex,
+  touchSession
+} from "./lib/sessions";
+import type { SessionIndex } from "./lib/sessions";
+import { getStoredUserId } from "./lib/thread";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
-import type { ConnectionState, UploadedItem } from "./types";
+import type { ConnectionState, SessionHistoryMessage, UploadedItem } from "./types";
 
 /** 顶层视图：对话研搜 / 知识导入 / 知识库管理 */
 type AppView = "chat" | "import" | "kb";
@@ -56,30 +71,6 @@ function connectionLabel(state: ConnectionState): string {
   return labels[state];
 }
 
-/** 会话标题：取首个提问的前 18 字，空会话给占位名 */
-function turnTitle(turn: ChatTurn): string {
-  const text = turn.content.trim().replace(/\s+/g, " ");
-  if (!text) {
-    return "新会话";
-  }
-  return text.length > 18 ? `${text.slice(0, 18)}…` : text;
-}
-
-/** 距底多少像素内仍算「正在看最新内容」；越小越容易被判为已上滚 */
-const BOTTOM_EPS = 12;
-
-function formatClock(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleTimeString("zh-CN", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-}
-
 function createTurn(content: string): ChatTurn {
   return {
     id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`,
@@ -94,14 +85,69 @@ function createTurn(content: string): ChatTurn {
   };
 }
 
+/** 轮次距底多少像素内仍算「正在看最新内容」；越小越容易被判为已上滚 */
+const BOTTOM_EPS = 12;
+
+function historyTurn(
+  id: string,
+  user: SessionHistoryMessage,
+  assistant: SessionHistoryMessage | null
+): ChatTurn {
+  const at = (assistant?.ts || user.ts || 0) * 1000;
+  return {
+    id,
+    content: user.text,
+    events: [],
+    files: [],
+    imageUrls: assistant?.image_urls ?? [],
+    isRunning: false,
+    notices: [],
+    result: assistant?.text ?? "",
+    timestamp: new Date(at || Date.now()).toISOString()
+  };
+}
+
+/**
+ * 把后端回读的问答历史还原成轮次
+ *
+ * 只还原「问了什么 / 答了什么 / 配图」：过程事件不落库，所以还原出来的轮次没有轨迹。
+ * 没有配对答复的提问也保留一条 —— 用户至少能看到自己问过什么，而不是凭空少一轮。
+ */
+function turnsFromHistory(messages: SessionHistoryMessage[]): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  let pending: SessionHistoryMessage | null = null;
+
+  messages.forEach((item, index) => {
+    if (item.role === "user") {
+      pending = item;
+      return;
+    }
+    if (item.role !== "assistant") {
+      return;
+    }
+    turns.push(
+      historyTurn(`h-${index}-${Math.round(item.ts * 1000)}`, pending ?? item, item)
+    );
+    pending = null;
+  });
+
+  const tail = pending as SessionHistoryMessage | null;
+  if (tail) {
+    turns.push(historyTurn(`h-tail-${Math.round(tail.ts * 1000)}`, tail, null));
+  }
+  return turns;
+}
+
 export default function App() {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [view, setView] = useState<AppView>("chat");
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [sessions, setSessions] = useState<SessionIndex[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState("");
   const [sessionFilter, setSessionFilter] = useState("");
-  const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
+  const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
   const wasRunningRef = useRef(false);
   // 是否跟随最新内容：由滚动位置派生，用户一旦离开底部立即置否
@@ -110,7 +156,75 @@ export default function App() {
   const forceFollowRef = useRef(false);
   // 浮标可见性单独用状态承载，只在布尔翻转时重渲染（滚动事件很密）
   const [atBottom, setAtBottom] = useState(true);
+  // 历史回读出来的轮次不接实时流状态，否则上一轮的答案会被盖到它身上
+  const restoredTurnIdsRef = useRef<Set<string>>(new Set());
+  // 会话切换后要把「最近提问」那一轮滚进视口（等轮次渲染出来再滚）
+  const pendingScrollRef = useRef(false);
+  const sessionsRef = useRef<SessionIndex[]>([]);
+  sessionsRef.current = sessions;
   const session = useDeepAgentSession();
+
+  // 首屏：本地索引先立起来（刷新后侧栏立刻有内容），随后由后端索引校正
+  useEffect(() => {
+    const local = loadSessionIndex();
+    const current = session.threadId;
+    const base = local.some((item) => item.id === current)
+      ? local
+      : [createSessionEntry(current), ...local];
+    setSessions(base);
+    setActiveSessionId(current);
+    saveSessionIndex(base);
+    // 只跑首屏一次：之后 activeSessionId 由会话切换 / 新建驱动
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    listSessions(getStoredUserId())
+      .then((response) => {
+        if (disposed) {
+          return;
+        }
+        setSessions((previous) => {
+          const merged = mergeSessionIndex(previous, response.sessions);
+          saveSessionIndex(merged);
+          return merged;
+        });
+      })
+      .catch(() => {
+        // 后端不可达时保留本地索引：侧栏退化为本地视图，不打扰用户
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  // 切会话 / 刷新后按会话回读内容（本地索引只有标题，正文以后端为准）
+  useEffect(() => {
+    if (!activeSessionId) {
+      return;
+    }
+    let disposed = false;
+    fetchSessionHistory(activeSessionId)
+      .then((history) => {
+        if (disposed) {
+          return;
+        }
+        setTurns((previous) => {
+          if (previous.length > 0) {
+            return previous;
+          }
+          const restored = turnsFromHistory(history.messages);
+          restored.forEach((turn) => restoredTurnIdsRef.current.add(turn.id));
+          return restored;
+        });
+      })
+      .catch(() => {
+        // 回读失败保留本地已有内容：新会话本来就没有历史，属正常分支
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeSessionId]);
 
   // 任务进入终态（成功 / 已停止 / 失败）即清空暂存附件，避免跨轮残留
   useEffect(() => {
@@ -127,6 +241,9 @@ export default function App() {
       }
 
       const latestTurn = previous[previous.length - 1];
+      if (restoredTurnIdsRef.current.has(latestTurn.id)) {
+        return previous;
+      }
       const nextLatestTurn = {
         ...latestTurn,
         events: session.events,
@@ -175,6 +292,20 @@ export default function App() {
     });
   }, [turns, session.isRunning]);
 
+  // 会话切换后落到「最近提问」那一轮：等轮次渲染出来再滚
+  useEffect(() => {
+    if (!pendingScrollRef.current || turns.length === 0) {
+      return;
+    }
+    pendingScrollRef.current = false;
+    const latest = turns[turns.length - 1];
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`turn-${latest.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [turns]);
+
   /** 是否仍停在底部附近：容器底距 ≤ BOTTOM_EPS 才算「正在看最新内容」 */
   function handleStreamScroll() {
     const node = streamRef.current;
@@ -219,6 +350,13 @@ export default function App() {
     setTurns((previous) => [...previous, nextTurn]);
     setQuery("");
 
+    // 会话索引：首问定标题，之后只刷新时间与条数（侧栏一个会话一条）
+    setSessions((previous) => {
+      const next = touchSession(previous, activeSessionId, cleanQuery);
+      saveSessionIndex(next);
+      return next;
+    });
+
     try {
       await session.submitTask(cleanQuery);
       message.success("任务已启动，执行过程会显示在对话中");
@@ -261,27 +399,107 @@ export default function App() {
     }
   }
 
+  /** 新建研搜 = 新建会话页：旧会话留在侧栏，随时可点回 */
   function handleNewSession() {
-    session.resetSession();
+    const nextSessionId = session.resetSession();
     setTurns([]);
     setQuery("");
     setStagedItems([]);
-    setPickedTurnId(null);
+    setSessionFilter("");
+    setMenuSessionId(null);
     setView("chat");
-    // 新会话从空白页开始：重新回到跟随态，避免继承上一会话的回看位置
+    setActiveSessionId(nextSessionId);
+    restoredTurnIdsRef.current.clear();
     followRef.current = true;
     forceFollowRef.current = false;
     setAtBottom(true);
+    setSessions((previous) => {
+      const next = [createSessionEntry(nextSessionId), ...previous];
+      saveSessionIndex(next);
+      return next;
+    });
   }
 
-  /** 会话分组：照 Ragent 的 今天 / 更早 两桶（本项目只有内存态会话，不落库按天分） */
-  const sessionGroups = useMemo(() => {
+  /** 点侧栏条目：切到该会话页，并落到它最近的一轮 */
+  function handleSelectSession(target: SessionIndex) {
+    setView("chat");
+    setMenuSessionId(null);
+
+    if (target.id !== activeSessionId) {
+      session.selectSession(target.id);
+      setTurns([]);
+      setQuery("");
+      setStagedItems([]);
+      setActiveSessionId(target.id);
+      restoredTurnIdsRef.current.clear();
+    }
+
+    // 定位交给「落到最近一轮」的那条副作用：它等轮次渲染完才动。
+    // 同时把跟随关掉，避免自动跟随立刻把视图拉到底、把这次定位抵消掉。
+    followRef.current = false;
+    setAtBottom(false);
+    pendingScrollRef.current = true;
+    if (target.id === activeSessionId) {
+      // 同一会话时 turns 引用不变，副作用不会触发，这里补一次空更新把它叫醒
+      setTurns((previous) => [...previous]);
+    }
+  }
+
+  /** 删除会话：二次确认后连同该会话的对话记忆与产物一起删（长期记忆不动） */
+  function handleDeleteSession(target: SessionIndex) {
+    setMenuSessionId(null);
+    const title = target.title || "新会话";
+
+    modal.confirm({
+      cancelText: "取消",
+      content:
+        "将同时删除该会话的全部对话记忆与产物（消息、会话图状态、上传附件、输出文件）。长期记忆不受影响。",
+      okButtonProps: { danger: true },
+      okText: "删除",
+      onOk: async () => {
+        try {
+          await deleteSessionApi(target.id, getStoredUserId());
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "删除会话失败");
+          return;
+        }
+
+        const rest = removeSessionEntry(sessionsRef.current, target.id);
+        message.success("会话已删除");
+
+        if (target.id !== activeSessionId) {
+          saveSessionIndex(rest);
+          setSessions(rest);
+          return;
+        }
+
+        // 删的是当前会话：切到相邻会话；一个都不剩就新开一页空白会话
+        const fallbackId = rest.length > 0 ? rest[0].id : session.resetSession();
+        const nextIndex = rest.length > 0 ? rest : [createSessionEntry(fallbackId)];
+        saveSessionIndex(nextIndex);
+        setSessions(nextIndex);
+        if (rest.length > 0) {
+          session.selectSession(fallbackId);
+        }
+        setActiveSessionId(fallbackId);
+        setTurns([]);
+        setStagedItems([]);
+        restoredTurnIdsRef.current.clear();
+      },
+      title: `删除会话「${title}」？`
+    });
+  }
+
+  /** 侧栏按会话渲染：搜索只过滤索引，条目数始终等于会话数 */
+  const visibleSessions = useMemo(() => {
     const keyword = sessionFilter.trim().toLowerCase();
-    const matched = keyword
-      ? turns.filter((turn) => turnTitle(turn).toLowerCase().includes(keyword))
-      : turns;
-    return matched.slice().reverse();
-  }, [sessionFilter, turns]);
+    if (!keyword) {
+      return sessions;
+    }
+    return sessions.filter((item) =>
+      (item.title || "新会话").toLowerCase().includes(keyword)
+    );
+  }, [sessionFilter, sessions]);
 
   const online = session.connectionState === "connected";
   const status = badgeStatus(session.connectionState);
@@ -380,57 +598,15 @@ export default function App() {
             </div>
           </div>
 
-          <section className="agent-sessions">
-            <div className="agent-session-wrap">
-              <div className="agent-session-list">
-                {turns.length === 0 ? (
-                  <div className="agent-rail-empty">
-                    <MessageOutlined aria-hidden="true" />
-                    <p>暂无会话记录</p>
-                  </div>
-                ) : sessionGroups.length === 0 ? (
-                  <div className="agent-rail-empty">
-                    <SearchOutlined aria-hidden="true" />
-                    <p>无匹配会话</p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="agent-session-group">最近提问</div>
-                    {sessionGroups.map((turn) => (
-                      <div
-                        className="agent-session-item"
-                        data-active={pickedTurnId === turn.id}
-                        key={turn.id}
-                      >
-                        <button
-                          className="agent-session-btn"
-                          onClick={() => {
-                            setView("chat");
-                            setPickedTurnId(turn.id);
-                            const node = document.getElementById(`turn-${turn.id}`);
-                            node?.scrollIntoView({ behavior: "smooth", block: "start" });
-                          }}
-                          title={turn.content}
-                          type="button"
-                        >
-                          <span className="agent-session-title agent-session-title--fade">
-                            {turnTitle(turn)}
-                          </span>
-                          <span className="agent-session-meta">
-                            {formatClock(turn.timestamp)}
-                          </span>
-                        </button>
-                        <span className="agent-item-btn" aria-hidden="true">
-                          <MoreOutlined />
-                        </span>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
-              <span className="agent-session-fade" aria-hidden="true" />
-            </div>
-          </section>
+          <SessionRail
+            activeId={activeSessionId}
+            filtered={sessionFilter.trim().length > 0}
+            menuId={menuSessionId}
+            onDelete={handleDeleteSession}
+            onSelect={handleSelectSession}
+            onToggleMenu={setMenuSessionId}
+            sessions={visibleSessions}
+          />
 
           <div className="agent-rail-stats" aria-label="运行统计">
             <div className="agent-rail-stat">

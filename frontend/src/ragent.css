@@ -633,6 +633,45 @@
   background: rgba(64, 54, 38, 0.08);
 }
 
+/* 行尾「更多」展开的菜单：浮在行下方，不占行高（占位会把标题提前截断） */
+.agent-app .agent-session-menu {
+  position: absolute;
+  right: 6px;
+  top: calc(100% - 6px);
+  z-index: 6;
+  min-width: 118px;
+  border: var(--agent-hair-strong);
+  border-radius: 10px;
+  background: var(--agent-rail-card);
+  box-shadow: var(--agent-rail-shadow);
+  padding: 4px;
+}
+
+.agent-app .agent-session-action {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 7px var(--agent-s3);
+  text-align: left;
+  font-size: var(--agent-t-sm);
+  color: var(--agent-rail-text);
+  transition: background 0.12s, color 0.12s;
+}
+
+.agent-app .agent-session-action:hover {
+  background: var(--agent-sunk);
+}
+
+.agent-app .agent-session-action[data-danger="true"] {
+  color: var(--agent-error);
+}
+
+.agent-app .agent-session-action[data-danger="true"]:hover {
+  background: var(--agent-error-wash);
+}
+
 .agent-app .agent-rail-empty {
   height: 100%;
   min-height: 120px;

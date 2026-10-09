@@ -83,6 +83,36 @@ export interface SessionHistoryResponse {
   messages: SessionHistoryMessage[];
 }
 
+/** 一条会话索引（GET /api/sessions）：由后端会话行维护，时间是 epoch 秒 */
+export interface SessionSummary {
+  session_id: string;
+  user_id?: string | null;
+  title: string;
+  message_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+  total: number;
+}
+
+/** 按会话删除时四类数据各自的清理结果（字符串为分步状态，便于观测哪一步没清干净） */
+export interface SessionDeleteResponse {
+  status: "deleted" | string;
+  session_id: string;
+  removed: {
+    messages: number;
+    legacy_agent: number;
+    legacy_rag: number;
+    conversation: number;
+    checkpoint: string;
+    uploads: string;
+    output: { sessions: string; legacy: string };
+  };
+}
+
 /** 子智能体返回契约的一次观察结果（§2：契约从"提示词约定"升级为"可观测事实"） */
 export interface SubAgentNotice {
   /** 子智能体名，如「网络搜索助手」 */
