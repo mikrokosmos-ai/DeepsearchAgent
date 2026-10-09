@@ -809,6 +809,40 @@
   background: transparent;
 }
 
+/* 滚动容器的外壳：本身不滚动，只为「回到底部」浮标提供定位上下文。
+   浮标必须是滚动容器的兄弟节点——放进滚动容器里会随内容一起被滚走 */
+.agent-app .agent-stream-wrap {
+  position: relative;
+  display: grid;
+  min-height: 0;
+}
+
+/* 「回到底部」浮标：仅在流式中且用户已离开底部时挂载 */
+.agent-app .agent-jump-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: var(--agent-s4);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-s2);
+  border: var(--agent-hair-strong);
+  border-radius: var(--agent-radius-lg);
+  background: var(--agent-surface);
+  color: var(--agent-muted);
+  padding: 6px var(--agent-s4);
+  font-family: var(--agent-font-sans);
+  font-size: var(--agent-t-sm);
+  white-space: nowrap;
+  box-shadow: var(--agent-rail-shadow);
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.agent-app .agent-jump-bottom:hover {
+  color: var(--agent-ink);
+  border-color: var(--agent-muted);
+}
+
 .agent-app .agent-stream-rows {
   /* 880 内容 + 两侧 32 留白收在列内 */
   max-width: 944px;
@@ -2544,7 +2578,8 @@
   }
 
   .agent-app .agent-new-btn,
-  .agent-app .agent-session-item {
+  .agent-app .agent-session-item,
+  .agent-app .agent-jump-bottom {
     transition: none;
   }
 }
