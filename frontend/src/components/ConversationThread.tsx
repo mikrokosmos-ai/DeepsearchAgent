@@ -67,6 +67,9 @@ interface TraceRow {
   text?: string;
   data?: Record<string, unknown>;
   streaming?: boolean;
+  /** 终态标记（完成 / 已停止 / 失败 / 已建会话），与内容同行显示 */
+  status?: string;
+  statusClass?: string;
 }
 
 function formatTime(value: string): string {
@@ -265,8 +268,11 @@ function TraceRowItem({ row, showTs }: { row: TraceRow; showTs: boolean }) {
           {row.channel === "tool" && row.text ? (
             <span className="agent-tool-chip">{row.text}</span>
           ) : null}
-          {row.channel === "hint" && row.text ? (
+          {row.channel === "hint" && row.text && !row.status ? (
             <span className="agent-status-idle">{row.text}</span>
+          ) : null}
+          {row.status ? (
+            <span className={row.statusClass ?? "agent-status-idle"}>{row.status}</span>
           ) : null}
           {row.ts && showTs ? <span className="agent-row-ts">{row.ts}</span> : null}
         </div>
@@ -286,9 +292,6 @@ function TraceRowBody({ row }: { row: TraceRow }) {
         <MarkdownRenderer content={row.text ?? ""} />
       </div>
     );
-  }
-  if (row.channel === "error") {
-    return <div className="agent-row-text">{row.text}</div>;
   }
   if (row.channel === "hint") {
     return null;
@@ -329,62 +332,280 @@ function summarize(data: Record<string, unknown>): string {
   return `对象 · ${keys.slice(0, 4).join(", ")}${keys.length > 4 ? "…" : ""}`;
 }
 
-/** 一轮的轨迹行：user 行 + 各事件的工具/思考/错误行 + answer 行 */
-function buildTurnRows(turn: ChatTurn): TraceRow[] {
-  const rows: TraceRow[] = [];
+/* ══ 过程区：工具按名归组、进度原地刷新 ═══════════════════════════════════ */
 
-  rows.push({
-    key: `u-${turn.id}`,
-    channel: "user",
-    ts: formatTime(turn.timestamp),
-    text: turn.content
-  });
+/** 进度事件：检索 / 导入链路的节点进度与流式增量（一律归入所属调用的组内） */
+function isProgressEvent(event: string): boolean {
+  return event.endsWith("_progress") || event.endsWith("_delta");
+}
+
+/** 子问题取值键：各工具入参里代表「这次问的是什么」的字段，按顺序取第一个非空项 */
+const SUBJECT_KEYS = [
+  "question",
+  "query",
+  "table_name",
+  "filename",
+  "instruction",
+  "写入的文本内容"
+];
+
+interface CallInfo {
+  key: string;
+  /** 该次调用的子问题 */
+  subject: string;
+  /** 该次调用内的最后一条进度台账（原地刷新，不逐条追加） */
+  progressText?: string;
+  progressTs?: string;
+}
+
+interface ProcessGroup {
+  kind: "group";
+  key: string;
+  toolName: string;
+  label: string;
+  code: string;
+  calls: CallInfo[];
+}
+
+interface ProcessRowItem {
+  kind: "row";
+  key: string;
+  row: TraceRow;
+}
+
+type ProcessItem = ProcessGroup | ProcessRowItem;
+
+interface TurnProcess {
+  items: ProcessItem[];
+  totalCalls: number;
+  groupCount: number;
+  progressCount: number;
+}
+
+function readToolName(event: MonitorMessage): string {
+  const raw = event.data?.tool_name;
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim();
+  }
+  const prefix = "开始执行工具: ";
+  return event.message.startsWith(prefix)
+    ? event.message.slice(prefix.length).trim()
+    : event.message.trim();
+}
+
+/** 工具入参：report_tool 把它放在 data.args 下，整包 data 只作兜底 */
+function readToolArgs(event: MonitorMessage): Record<string, unknown> | undefined {
+  const nested = event.data?.args;
+  if (nested && typeof nested === "object") {
+    return nested as Record<string, unknown>;
+  }
+  return event.data;
+}
+
+/** 工具名常见形如「本地知识库检索工具：local_rag_search」→ 中文名 + 代码名 */
+function splitToolName(toolName: string): { label: string; code: string } {
+  const index = toolName.indexOf("：");
+  if (index <= 0) {
+    return { label: toolName, code: "" };
+  }
+  return { label: toolName.slice(0, index), code: toolName.slice(index + 1) };
+}
+
+function callSubject(args: Record<string, unknown> | undefined): string {
+  if (!args) {
+    return "";
+  }
+  for (const key of SUBJECT_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim().replace(/\s+/g, " ");
+    }
+  }
+  return summarize(args);
+}
+
+/**
+ * 把一轮的事件拆成过程区结构。
+ *
+ * 归组的边界是 `tool_start`：它之后、下一个 `tool_start` 之前的进度事件都算这一次调用的，
+ * 且组内只保留最后一条（原地刷新）。同名工具的多次调用共用一行并标注次数，
+ * 子问题作为展开项逐个列出——这正是「多角度检索」的本来面目，不必再平铺成多套流程。
+ *
+ * 子智能体契约提示由 `turn.notices` 承载（渲染在答复区的 artifacts 块），此处不再逐条成行，
+ * 否则同一件事会在两处重复出现。
+ */
+function buildTurnProcess(turn: ChatTurn): TurnProcess {
+  const items: ProcessItem[] = [];
+  const groupByTool = new Map<string, ProcessGroup>();
+  let currentCall: CallInfo | null = null;
+  let looseProgressIndex = -1;
+  let progressCount = 0;
 
   turn.events.forEach((event, index) => {
-    const channel = eventChannel(event.event);
-    const status = eventStatus(event.event);
-    rows.push({
-      key: `e-${turn.id}-${index}`,
-      channel,
-      ts: formatTime(event.timestamp),
-      text: channel === "tool" ? event.message : event.message,
-      data: channel === "tool" ? event.data : undefined,
-      streaming: turn.isRunning && index === turn.events.length - 1 && channel !== "error"
-    });
-    // 终态事件额外把状态标挂在同一行（Ragent 的做法：状态与内容同行）
-    if (status) {
-      rows[rows.length - 1].text = event.message;
+    if (event.event === "tool_start") {
+      const toolName = readToolName(event);
+      let group = groupByTool.get(toolName);
+      if (!group) {
+        const { label, code } = splitToolName(toolName);
+        group = {
+          kind: "group",
+          key: `g-${turn.id}-${toolName}`,
+          toolName,
+          label,
+          code,
+          calls: []
+        };
+        groupByTool.set(toolName, group);
+        items.push(group);
+      }
+      const call: CallInfo = {
+        key: `c-${turn.id}-${index}`,
+        subject: callSubject(readToolArgs(event))
+      };
+      group.calls.push(call);
+      currentCall = call;
+      looseProgressIndex = -1;
+      return;
     }
+
+    if (isProgressEvent(event.event)) {
+      progressCount += 1;
+      if (currentCall) {
+        currentCall.progressText = event.message;
+        currentCall.progressTs = event.timestamp;
+        return;
+      }
+      // 没有归属调用（如会话级导入进度）：同样只留最新一条，不逐条追加
+      const loose = looseProgressIndex >= 0 ? items[looseProgressIndex] : null;
+      if (loose && loose.kind === "row") {
+        loose.row.text = event.message;
+        loose.row.ts = formatTime(event.timestamp);
+        return;
+      }
+      const key = `p-${turn.id}-${index}`;
+      items.push({
+        kind: "row",
+        key,
+        row: { key, channel: "hint", ts: formatTime(event.timestamp), text: event.message }
+      });
+      looseProgressIndex = items.length - 1;
+      return;
+    }
+
+    if (event.event === "subagent_report") {
+      return;
+    }
+
+    const key = `e-${turn.id}-${index}`;
+    items.push({
+      kind: "row",
+      key,
+      row: {
+        key,
+        channel: eventChannel(event.event),
+        ts: formatTime(event.timestamp),
+        text: event.message,
+        status: eventStatus(event.event) ?? undefined,
+        statusClass: eventStatusClass(event.event)
+      }
+    });
   });
 
-  if (turn.isRunning && turn.events.length === 0) {
-    rows.push({
-      key: `wait-${turn.id}`,
-      channel: "hint",
-      ts: "",
-      text: "等待响应…",
-      streaming: true
-    });
+  const groups = items.filter((item): item is ProcessGroup => item.kind === "group");
+
+  return {
+    items,
+    totalCalls: groups.reduce((sum, group) => sum + group.calls.length, 0),
+    groupCount: groups.length,
+    progressCount
+  };
+}
+
+function ToolGroupRow({ group, expanded }: { group: ProcessGroup; expanded: boolean }) {
+  return (
+    <div className="agent-row agent-tool-group" data-channel="tool" data-tool={group.toolName}>
+      <div className="agent-row-rail">
+        <span className="agent-node">{GLYPH.tool}</span>
+      </div>
+      <div className="agent-row-content">
+        <div className="agent-meta-line">
+          <span className="agent-channel">{CHANNEL_NAME.tool}</span>
+          <span className="agent-tool-chip">{group.label}</span>
+          {group.code ? <span className="agent-tool-code">{group.code}</span> : null}
+          {group.calls.length > 1 ? (
+            <span className="agent-row-count">{`×${group.calls.length}`}</span>
+          ) : null}
+        </div>
+        {expanded ? (
+          <ol className="agent-tool-calls">
+            {group.calls.map((call) => (
+              <li className="agent-tool-call" key={call.key}>
+                <span className="agent-call-subject">{call.subject || "（未提供子问题）"}</span>
+                {call.progressText ? (
+                  <span className="agent-call-progress">
+                    <span className="agent-call-progress-ts">
+                      {call.progressTs ? formatTime(call.progressTs) : ""}
+                    </span>
+                    <span className="agent-call-progress-text">{call.progressText}</span>
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 过程区：默认折叠为「一行摘要 + 每种工具一行分组」。
+ *
+ * 分组行常驻（它本身就是折叠态的摘要），只有非工具的细节行与子问题清单随展开出现；
+ * 错误行例外——失败必须一眼可见，不能藏在折叠里。
+ */
+function ProcessZone({ turn }: { turn: ChatTurn }) {
+  const [open, setOpen] = useState(false);
+  const process = buildTurnProcess(turn);
+
+  if (process.items.length === 0) {
+    return null;
   }
 
-  if (turn.result) {
-    rows.push({
-      key: `a-${turn.id}`,
-      channel: "answer",
-      ts: "",
-      text: turn.result
-    });
-  } else if (turn.isRunning && turn.events.length > 0) {
-    rows.push({
-      key: `a-pending-${turn.id}`,
-      channel: "hint",
-      ts: "",
-      text: "正在汇总答复…",
-      streaming: true
-    });
+  const brief: string[] = [];
+  if (process.groupCount > 0) {
+    brief.push(`工具 ${process.groupCount} 种 · ${process.totalCalls} 次调用`);
+  }
+  if (process.progressCount > 0) {
+    brief.push(`进度 ${process.progressCount} 条`);
   }
 
-  return rows;
+  return (
+    <div className="agent-process-zone" data-collapsed={!open}>
+      <button
+        aria-expanded={open}
+        className="agent-process-toggle"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <span className="agent-caret">{open ? "▾" : "▸"}</span>
+        <span className="agent-process-title">执行过程</span>
+        {brief.length > 0 ? <span className="agent-process-brief">{brief.join(" · ")}</span> : null}
+      </button>
+
+      <div className="agent-process-body">
+        {process.items.map((item) => {
+          if (item.kind === "group") {
+            return <ToolGroupRow expanded={open} group={item} key={item.key} />;
+          }
+          if (!open && item.row.channel !== "error") {
+            return null;
+          }
+          return <TraceRowItem key={item.key} row={item.row} showTs />;
+        })}
+      </div>
+    </div>
+  );
 }
 
 function NoticeList({ notices }: { notices: SubAgentNotice[] }) {
@@ -432,39 +653,43 @@ function FileList({ files }: { files: OutputFile[] }) {
   );
 }
 
-/** 轮次卡：卡头 TURN N + 总耗时，卡内是轨迹行 */
-function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
-  const [now, setNow] = useState(Date.now());
+/* ══ 答复区：本轮产出（答案 + 配图 + 产物）═══════════════════════════════ */
 
-  useEffect(() => {
-    if (!turn.isRunning) {
-      return;
-    }
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [turn.isRunning]);
+function buildPromptRow(turn: ChatTurn): TraceRow {
+  return {
+    key: `u-${turn.id}`,
+    channel: "user",
+    ts: formatTime(turn.timestamp),
+    text: turn.content
+  };
+}
 
-  const rows = buildTurnRows(turn);
-  const headTs = rows[0]?.ts ?? "";
-  const elapsedMs = turnElapsed(turn, now);
-  // 流式中不显示总耗时 收尾实测后才亮
-  const elapsed = turn.isRunning ? "" : elapsedMs != null ? formatDuration(elapsedMs) : "";
+/** 答复行：有答案给答案，流式中给占位；既没答案也不在跑则不出行 */
+function buildAnswerRow(turn: ChatTurn): TraceRow | null {
+  if (turn.result) {
+    return { key: `a-${turn.id}`, channel: "answer", ts: "", text: turn.result };
+  }
+  if (turn.isRunning) {
+    return {
+      key: `a-pending-${turn.id}`,
+      channel: "hint",
+      ts: "",
+      text: turn.events.length > 0 ? "正在汇总答复…" : "等待响应…",
+      streaming: true
+    };
+  }
+  return null;
+}
+
+function AnswerZone({ turn }: { turn: ChatTurn }) {
+  const answerRow = buildAnswerRow(turn);
 
   return (
-    <section className="agent-turn" id={`turn-${turn.id}`}>
-      <header className="agent-turn-head">
-        <span className="agent-turn-no">TURN {index + 1}</span>
-        <span className="agent-turn-ts">
-          {headTs}
-          {elapsed ? <span className="agent-turn-dur"> · {elapsed}</span> : null}
-        </span>
-      </header>
-      {rows.map((row, rowIndex) => (
-        <TraceRowItem key={row.key} row={row} showTs={rowIndex > 0} />
-      ))}
+    <div className="agent-answer-zone">
+      {answerRow ? <TraceRowItem row={answerRow} showTs={false} /> : null}
 
       {turn.imageUrls.length > 0 ? (
-        <div className="agent-row" data-channel="hint">
+        <div className="agent-row agent-block-images" data-channel="hint">
           <div className="agent-row-rail">
             <span className="agent-node">·</span>
           </div>
@@ -485,7 +710,7 @@ function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
       ) : null}
 
       {turn.notices.length > 0 || turn.files.length > 0 ? (
-        <div className="agent-row" data-channel="hint">
+        <div className="agent-row agent-block-artifacts" data-channel="hint">
           <div className="agent-row-rail">
             <span className="agent-node">·</span>
           </div>
@@ -502,6 +727,42 @@ function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/* ══ 轮次卡 ═══════════════════════════════════════════════════════════════ */
+
+function TurnCard({ turn, index }: { turn: ChatTurn; index: number }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!turn.isRunning) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [turn.isRunning]);
+
+  const promptRow = buildPromptRow(turn);
+  const elapsedMs = turnElapsed(turn, now);
+  // 流式中不显示总耗时 收尾实测后才亮
+  const elapsed = turn.isRunning ? "" : elapsedMs != null ? formatDuration(elapsedMs) : "";
+
+  return (
+    <section className="agent-turn" id={`turn-${turn.id}`}>
+      <header className="agent-turn-head">
+        <span className="agent-turn-no">TURN {index + 1}</span>
+        <span className="agent-turn-ts">
+          {promptRow.ts}
+          {elapsed ? <span className="agent-turn-dur"> · {elapsed}</span> : null}
+        </span>
+      </header>
+
+      {/* 顺序固定：提问 → 答复区（答案 + 配图 + 产物）→ 过程区（默认折叠） */}
+      <TraceRowItem row={promptRow} showTs={false} />
+      <AnswerZone turn={turn} />
+      <ProcessZone turn={turn} />
     </section>
   );
 }

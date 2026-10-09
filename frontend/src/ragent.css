@@ -1272,7 +1272,101 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * §4b 输入条
+ *  轮次分区：答复区（产出）在前 + 过程区（执行）默认折叠
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* 答复区：答案、配图、产物三块常驻可见 与过程区之间只留一条细缝 */
+.agent-app .agent-answer-zone {
+  padding-bottom: var(--agent-s1);
+}
+
+/* 过程区：折叠时只留「一行摘要 + 每种工具一行分组」，分组行本身就是过程目录 */
+.agent-app .agent-process-zone {
+  margin-top: var(--agent-s1);
+  border-top: var(--agent-hair);
+  padding-top: var(--agent-s2);
+}
+
+.agent-app .agent-process-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--agent-s2);
+  width: 100%;
+  border: 0;
+  border-radius: var(--agent-radius);
+  background: transparent;
+  padding: 3px var(--agent-s1);
+  color: var(--agent-muted);
+  font-family: var(--agent-font-mono);
+  font-size: var(--agent-t-xs);
+  text-align: left;
+  transition: color 0.12s;
+}
+
+.agent-app .agent-process-toggle:hover {
+  color: var(--agent-ink);
+}
+
+/* 与 channel 标签同一套字体规则：小号大写 + 字距 一眼认出是分区标题 */
+.agent-app .agent-process-title {
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-weight: 600;
+}
+
+.agent-app .agent-process-brief {
+  color: var(--agent-faint);
+}
+
+/* 工具分组行：同名工具的多次调用共用一行 行上标注次数 */
+.agent-app .agent-tool-group .agent-row-content {
+  padding-bottom: var(--agent-s2);
+}
+
+.agent-app .agent-tool-code {
+  color: var(--agent-faint);
+}
+
+/* 展开后的子问题：一次调用一条 缩进挂在分组行下 */
+.agent-app .agent-tool-calls {
+  list-style: none;
+  margin: var(--agent-s2) 0 0;
+  padding: 0 0 0 var(--agent-s3);
+  border-left: var(--agent-hair);
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-s2);
+}
+
+.agent-app .agent-tool-call {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-app .agent-call-subject {
+  font-size: var(--agent-t-sm);
+  line-height: 1.55;
+  color: var(--agent-ink);
+  word-break: break-word;
+}
+
+/* 该次调用内的最新一条进度：组内只留一行 所以字号再压半级 */
+.agent-app .agent-call-progress {
+  font-family: var(--agent-font-mono);
+  font-size: var(--agent-t-xs);
+  line-height: 1.55;
+  color: var(--agent-faint);
+  word-break: break-word;
+}
+
+.agent-app .agent-call-progress-ts {
+  margin-right: var(--agent-s2);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *输入条
  * ══════════════════════════════════════════════════════════════════════════ */
 
 .agent-app .agent-composer {
