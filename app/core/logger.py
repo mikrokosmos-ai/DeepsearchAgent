@@ -25,11 +25,24 @@ from app.core.paths import PROJECT_ROOT
 # 显式加载 .env：日志模块可能在应用启动最早期被导入，此时其它模块尚未加载环境变量
 load_dotenv(find_dotenv())
 
+# loguru 内置级别名；环境变量里的级别名先归一到它，非法值回退，避免 import 期抛错
+_LOGURU_LEVELS = ("TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL")
+
+
+def _normalize_level(name: "str | None", fallback: str) -> str:
+    """把环境变量中的级别名归一化为 loguru 已知级别；空值与非法值回退到 fallback"""
+    candidate = (name or "").strip().upper()
+    return candidate if candidate in _LOGURU_LEVELS else fallback
+
+
 LOG_CONSOLE_ENABLE = os.getenv("LOG_CONSOLE_ENABLE", "True").lower() == "true"
 LOG_CONSOLE_LEVEL = os.getenv("LOG_CONSOLE_LEVEL", "INFO").upper()
 LOG_FILE_ENABLE = os.getenv("LOG_FILE_ENABLE", "True").lower() == "true"
 LOG_FILE_LEVEL = os.getenv("LOG_FILE_LEVEL", "INFO").upper()
 LOG_FILE_RETENTION = os.getenv("LOG_FILE_RETENTION", "7 days")
+
+# 监控事件（工具开始 / 助手调用 / 节点进度）的日志出口级别：
+LOG_MONITOR_LEVEL = _normalize_level(os.getenv("LOG_MONITOR_LEVEL"), LOG_CONSOLE_LEVEL)
 
 LOG_DIR = PROJECT_ROOT / "logs"
 

@@ -90,6 +90,9 @@ DeepsearchAgent 用 **DeepAgents 多智能体框架**把三者编排成一个主
 - **第三方 API 限流**：内置滑动窗口限速器（默认 60 秒 9 次），防止批量导入触发 VLM/LLM 平台限流。
 - **运行时目录统一收敛到仓库根**：`output/`（会话工作区 + 交付文档）、`updated/`（上传暂存）、`logs/`（日志），均由 `app/core/paths.PROJECT_ROOT` 推导，不写死层级。
 
+- **四层记忆按生命周期切分**：会话图状态（Redis checkpointer，前缀 + TTL）→ 会话消息统一模型（Redis 热窗口读穿 + MongoDB 权威）→ 中期摘要压缩（阈值触发、摘要落审计表）→ 用户长期事实（独立库 + 抽取仲裁 + 请求注入，**不落会话状态**）；容量上叠加「工具结果裁剪 → 受限合并 → 淘汰」的三级治理，详见 [6.5 记忆层](#65-记忆层redis--长期记忆)。
+- **降级不击穿主链路**：Redis 不可达时 checkpointer 自动回退进程内内存、会话热窗口与注入块回源数据库、抽取处理权走 MySQL —— 服务仍能启动、主链路仍可问答；权威数据始终落在 MongoDB / MySQL，清空 Redis 不会丢事实。
+
 ### 1.4 技术栈
 
 | 层次         | 技术选型                                                                              |
@@ -105,10 +108,10 @@ DeepsearchAgent 用 **DeepAgents 多智能体框架**把三者编排成一个主
 | 大语言模型      | 任意 OpenAI 兼容接口（默认阿里云 DashScope `qwen` 系列，文本 `qwen-max` / `qwen3.7-flash`，VLM `qwen-vl-max`） |
 | 向量数据库      | Milvus 2.6.23（AUTOINDEX / SPARSE_INVERTED_INDEX，IP 度量）                                |
 | 对象存储       | MinIO（业务图片资产持久化）                                                              |
-| 会话/图谱存储    | MongoDB 7（历史）、Neo4j 5.26（知识图谱，可选）、MySQL 8（业务数仓）                            |
+| 会话/图谱存储    | MongoDB 7（会话历史与统一消息模型）、Redis 8（记忆热层：checkpointer / 热窗口 / 摘要缓存）、Neo4j 5.26（知识图谱，可选）、MySQL 8（业务数仓 + 长期记忆独立库 `deepsearch_memory`） |
 | 联网检索       | Tavily + 阿里云百炼 MCP WebSearch                                                       |
 | 日志         | Loguru（控制台 + 文件双输出，按天滚动、自动清理）                                                 |
-| 基础设施       | Docker Compose（MySQL / Milvus / etcd / MinIO ×2 / Attu / MongoDB / Neo4j）             |
+| 基础设施       | Docker Compose（MySQL / Milvus / etcd / MinIO ×2 / Attu / MongoDB / Neo4j / Redis，共 9 个服务） |
 
 ---
 
@@ -595,6 +598,24 @@ curl "http://127.0.0.1:8000/api/download?path=<output_dir>/session_demo-001/repo
 | `app/utils/task_utils.py` | 内存态任务追踪（`pending/processing/completed/failed`），含节点名 → 中文名映射，供前端展示                  |
 | `app/utils/sse_utils.py`   | 事件队列与封装（导入进度推送）                                                            |
 
+### 6.5 记忆层（Redis / 长期记忆）
+
+四层记忆按「生命周期」切分，各层有自己的介质、读取者与上限。**阈值只有一个业务数字**：
+`MEMORY_CONTEXT_BUDGET_CHARS`（默认 120000 字符），其余阈值（裁剪门 / 压缩门 / 保留段 / 摘要上限 / 长期记忆上限 / 历史注入预算…）全部在 `app/core/memory/config.py` 里按固定比例派生 —— 不要新开环境变量。
+
+| 层  | 存什么                     | 介质                                                                   | 上限                          |
+| --- | ----------------------- | -------------------------------------------------------------------- | --------------------------- |
+| L0  | 会话图状态（原文）               | Redis（官方 `langgraph-checkpoint-redis`；前缀 `dsa:ckpt` / `dsa:ckpt_write`，TTL 7 天） | 热层，可过期；权威数据不在此处             |
+| L1  | 会话消息（统一模型，`layer` 分主流程 / RAG 两层） | Redis 热窗口 `dsa:conv:*` + MongoDB `conversations` / `messages`（权威）        | 注入按历史预算（预算的 20%）裁剪          |
+| L2  | 中期摘要（**替换**被压掉的原文）     | 上行请求 + MongoDB `context_compaction`（审计）+ Redis `dsa:summary:*`          | 摘要正文 clamp(10%, 1500, 6000) |
+| L3  | 用户长期事实（稳定事实，非对话原文）     | 独立库 `deepsearch_memory` 三张表（独立连接，**不碰业务库只读护栏**）                        | 全量注入但硬上限 1500 字符            |
+
+- **模块位置**：`app/core/memory/`（`config` / `checkpointer` / `conversation_repo` / `summary_store` / `chars` / `trimmer` / `long_term/*`）、`app/agent/middleware/{user_memory,memory_trim,memory_compaction,memory_stack}.py`、`app/tools/memory_flush_tool.py`、`app/api/memory_routes.py`；提示词资产 `app/prompts/templates/{memory_summary,memory_extraction}.prompt`。
+- **摘要压缩是「接管」而非新增**：DeepAgents 底座本就装配了一份摘要中间件，本项目用 `HarnessProfile.excluded_middleware` 排掉它、再用 `extra_middleware` 挂自己的实现（排除是 profile 级、作用于所有栈，**只排不补会让子智能体退化为无压缩**）。底座实现是**非破坏性**的：只改发给模型的请求副本，`state["messages"]` 恒为完整原文。
+- **整理工具 `flush_memory` 无参数**：事实写入权在服务端仲裁（模型只能「要求整理」），用户身份取自请求上下文；异常一律转可读文案，绝不抛。
+- **管理接口**：`GET /api/memory?user_id=`（查生效事实 + 当前注入块字符数）、`DELETE /api/memory/{item_id}`（忘掉某句话）、`DELETE /api/memory?user_id=`（清空全部，与前者严格区分）。
+- **建表**：`docker/mysql/memory_tables.sql` 已挂进 compose 的 initdb 目录，但该目录**只在数据目录为空时执行** —— 现有 volume 需手工跑一次（命令写在 SQL 文件头部）。
+- **降级路径**：Redis 不可达时 checkpointer 回退 `InMemorySaver`（日志关键字 `redis 不可用，回退 InMemorySaver`）、会话热窗口与注入块回源数据库、长期记忆抽取的处理权走 MySQL（生成列唯一索引），因此 Redis 停机不影响主链路。
 ---
 
 ## 七、开发指南
@@ -652,6 +673,30 @@ python -m app.rag.pipelines.query_pipeline.nodes.node_search_embedding
 
 运行前请确认：Milvus / MongoDB / MinIO / MySQL 已启动，`.env` 配置完整，本地模型已下载。日志输出到控制台与 `logs/app_YYYYMMDD.log`。
 
+记忆层回归（Redis / MongoDB / MySQL 需已启动）：
+
+```bash
+# 短期记忆持久化：跨进程恢复 / 降级 / 阈值派生（含失败能力自检）
+python scripts/verify_memory_short_term.py && python scripts/verify_memory_short_term.py --selftest
+
+# 会话消息统一模型 + 热窗口读穿
+python scripts/verify_memory_conversation.py && python scripts/verify_memory_conversation.py --selftest
+
+# 中期摘要压缩（接管底座中间件）：上行请求条数下降 / 审计行 / 当前代缓存
+python scripts/verify_memory_compaction.py && python scripts/verify_memory_compaction.py --selftest
+
+# 长期记忆：抽取素材限 layer=agent、水位递增、注入块不落库、管理接口
+python scripts/verify_memory_long_term.py && python scripts/verify_memory_long_term.py --selftest
+
+# 容量治理：工具结果裁剪与受限合并 / 淘汰
+python scripts/verify_memory_capacity.py && python scripts/verify_memory_capacity.py --selftest
+
+# 降级：Redis 不可达时四条读取路径仍可用、权威数据不丢
+python scripts/verify_memory_degrade.py && python scripts/verify_memory_degrade.py --selftest
+```
+
+端到端（需常驻服务）：`python scripts/verify_e2e_scenarios.py`；其中场景五（跨会话记住）与场景六（长会话压缩，需以小预算启动服务）见脚本头部说明。
+
 ---
 
 ## 九、常见问题 FAQ
@@ -697,6 +742,7 @@ python -m app.rag.pipelines.query_pipeline.nodes.node_search_embedding
 - [x] **运行时目录收敛到仓库根**：`output/` / `updated/` / `logs/` 统一由 `PROJECT_ROOT` 推导，废弃 `app/` 下的 output。
 - [x] **知识库导入接口独立化**：新增 `app/api/kb_routes.py`（`/api/kb/import`、`/api/kb/task/{id}`、`/api/kb/tasks`），与主对话解耦。
 - [x] **领域异常体系与日志规范化**：`app/core/exceptions.py` + `app/core/logger.py` 统一异常与日志出口。
+- [x] **记忆机制分层落地**：Redis 热层（短期会话持久化 + 热窗口）→ 会话消息统一模型 → 中期摘要压缩 → 跨会话长期记忆 → 容量治理（裁剪 / 受限合并 / 淘汰），并补齐降级路径与六组 `verify_memory_*.py` 回归脚本。
 
 ### 10.2 规划中 / 待评估
 

@@ -13,7 +13,7 @@ from typing import Any, Optional
 from fastapi import WebSocket
 
 from app.api.context import get_thread_context
-from app.core.logger import logger
+from app.core.logger import LOG_MONITOR_LEVEL, logger
 
 
 class ToolMonitor:
@@ -74,8 +74,9 @@ class ToolMonitor:
             except Exception:
                 pass
 
-        # 统一走 loguru：无前端场景下也能在日志文件中观察执行过程
-        logger.debug(f"[Monitor:{event_type}] {message}")
+        # 统一走 loguru：无前端场景下也能在日志与终端里观察执行过程
+        # 出口级别独立于 sink：缺省 INFO，可经 LOG_MONITOR_LEVEL 单独调整
+        logger.log(LOG_MONITOR_LEVEL, f"[Monitor:{event_type}] {message}")
 
     def _send_to_websocket(
         self,
