@@ -28,6 +28,7 @@ class QueryGraphState(TypedDict):
     retrieval_funnel: dict
 
     # --- 内部标记（节点间传参，不对外暴露语义）---
+    _confirm_unresolved: bool  # 确权未完成（候选歧义 / 未找到）：该轮不写检索层历史
     _rerank_degraded: bool  # 重排是否走了"补零分"降级分支（闸门据此放行）
     _evidence_gate_blocked: bool  # 证据闸门是否拦截了整批（供工具区分"无关"与"没命中"）
 
@@ -65,6 +66,7 @@ query_graph_default_state: QueryGraphState = {
     "rrf_chunks": [],
     "reranked_docs": [],
     "retrieval_funnel": {},
+    "_confirm_unresolved": False,
     "_rerank_degraded": False,
     "_evidence_gate_blocked": False,
     "channel_stat_embedding": {},

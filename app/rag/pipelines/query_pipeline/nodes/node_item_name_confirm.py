@@ -227,6 +227,8 @@ def step_6_deal_state(state, final_result, rewritten_query, history_chats):
     options_item_name_list = final_result.get("options_item_name_list", [])
     # 1. 判断确定列表有没有数据 (有 皆大欢喜)
     if len(confirmed_item_name_list) > 0:
+        # 确权成功：显式清掉"未完成"标记（state 可能由深拷贝/复用而来，避免残留 True）
+        state['_confirm_unresolved'] = False
         state['item_names'] = confirmed_item_name_list
         state['rewritten_query'] = rewritten_query
         state['history'] = history_chats
@@ -237,16 +239,26 @@ def step_6_deal_state(state, final_result, rewritten_query, history_chats):
     if len(options_item_name_list) > 0:
         option_name_str = "、".join(options_item_name_list)
         state["answer"] = f"您是想问以下哪个产品：{option_name_str}？请明确一下型号。"
+        # 候选歧义：确权未完成 —— 该标记会在两个下游闸门（写用户问句 / 写助手反问）被读到
+        state["_confirm_unresolved"] = True
         return state
     # 3. 可选都没有,无法确定无法可选,给与提示,明确即可
     state["answer"] = "抱歉，未找到相关产品，请提供准确型号以便我为您查询。"
+    state["_confirm_unresolved"] = True
     # 统一返回契约：三条分支都返回 state，避免出现"部分分支返回、部分分支隐式返回 None"的不一致
     return state
 
 
 @step_log("step_7_save_user_chat_message")
 def step_7_save_user_chat_message(state):
-    """保存本轮用户消息到统一会话集合（rag 层）"""
+    """保存本轮用户消息到统一会话集合（rag 层）
+    """
+    if state.get("_confirm_unresolved"):
+        logger.info(
+            "确权未完成：本轮用户问句不写入检索层历史（保持历史干净、避免下一轮自答）："
+            f"session_id={state.get('session_id')}"
+        )
+        return
     # 加固点：未走"确权成功"分支时 state 可能缺少 item_names / rewritten_query
     #       （例如调用方只传了 original_query），此处统一兜底，避免 KeyError。
     #       经 graph 调用时默认 state 已保证两键存在，故本兜底零行为变化。

@@ -4,18 +4,6 @@
 把本地 RAG 检索链路（`app/pipelines/query_pipeline` 的 `query_app`）封装成一个
 DeepAgents 可调用的 LangChain 工具，供「本地知识库助手」子智能体使用。
 
-工具契约（与原外部知识库工具的调用约定保持一致，便于主智能体平滑路由）：
-    1. 入参是自然语言问题，**返回字符串**（模型可直接阅读的答案文本）；
-    2. 工具内部先通过 `monitor` 上报调用参数，前端可展示当前检索动作；
-    3. 异常不抛出，转为中文错误提示返回，避免一次检索失败打断整个智能体任务。
-
-与 SSE 的关系：
-    query pipeline 内部通过 SSE 队列推送节点进度；本工具在调用期间用
-    `RagEventBridge` 把这些事件转发到 `monitor` 的 WebSocket 通道，
-    使前端能实时看到「确认问题产品 → 4 路召回 → 融合排序 → 生成答案」的进度。
-    因此 state 的 `is_stream` 置为 True —— 它是 task_utils 推送进度事件的前置开关
-    （`add_running_task/add_done_task` 仅在 is_stream 为真时推送），
-    与「答案最终以字符串返回」并不冲突。
 """
 
 from uuid import uuid4
@@ -30,6 +18,13 @@ from app.core.logger import logger
 from app.core.knowledge_image_store import record_images
 # 检索漏斗指标：子图 state 里的 retrieval_funnel 经此带出，供收尾写入 agent_run
 from app.core.retrieval_funnel_store import record_funnel
+from app.core.answer_shortcircuit import (
+    get_short_circuit,
+    acquire_inflight,
+    finish_inflight,
+    mark_short_circuit,
+    mark_unresolved,
+)
 from app.core.tool_failfast import get_tool_failure, mark_tool_failed
 from app.rag.pipelines.query_pipeline.graph import query_app
 from app.rag.pipelines.query_pipeline.state import create_query_default_state
@@ -39,6 +34,24 @@ _DEFAULT_SESSION_PREFIX = "local_kb_nocx"
 
 # 故障熔断标记用的工具名（与 @tool 注册名保持一致）
 _TOOL_NAME = "local_rag_search"
+
+def _clarify_message(candidate_text: str) -> str:
+    """
+    组装「需要用户确认型号」的返回文案。
+
+    单独抽成函数是为了让同问题短路能返回**同一条**反问：短路只存候选原文，
+    文案模板留在这里（唯一载体），避免两处各写一份后悄悄漂移。
+    """
+    return (
+        "【需要用户确认型号】知识库无法确定你问的是哪一个产品。"
+        "这**不是检索失败**，而是问题里的型号不够准确 —— 知识库的返回是："
+        f"{candidate_text}\n"
+        "请把这一情况如实上报给主智能体，由主智能体在最终答复里请用户补充准确的型号。"
+        "**不要再换措辞或换角度重复调用本工具**：型号没确定之前，换什么问法都只会撞同一堵墙，"
+        "重试不会得到不同结果、只会成倍消耗预算与时间。请立即结束检索并上报。"
+        "（系统说明：本任务内再调用本工具只会原样返回本条问句、不会执行任何检索。）"
+    )
+
 
 @tool
 def local_rag_search(question: str) -> str:
@@ -79,6 +92,23 @@ def local_rag_search(question: str) -> str:
             "（该故障在本任务内已确认，重复调用不会成功。请勿重试，"
             "请如实向主智能体上报本次故障。）"
         )
+
+    clarified = get_short_circuit(session_id, question)
+    if clarified:
+        logger.warning(
+            "本地知识库检索已短路（本会话内该问题已被判定为需确认型号）："
+            f"session_id={session_id}，问题={question[:60]}"
+        )
+        return _clarify_message(clarified)
+
+
+    proceed, inflight_clarify = acquire_inflight(session_id)
+    if not proceed:
+        logger.warning(
+            "本地知识库检索被确权闸门拦下（本任务已发生确权未完成，型号未确定前不再检索）："
+            f"session_id={session_id}，问题={question[:60]}"
+        )
+        return _clarify_message(inflight_clarify)
 
     try:
         # 埋点：与其它工具一致，前端可据此展示「正在执行本地知识库检索」
@@ -122,6 +152,7 @@ def local_rag_search(question: str) -> str:
             logger.warning(
                 f"本地知识库证据闸门拦截（本批判定为无关）：task_id={task_id}"
             )
+            finish_inflight(session_id)
             return (
                 "知识库没有相关资料。"
                 "（本次检索命中的内容与问题相关性过低，已被证据闸门整体过滤，"
@@ -132,17 +163,21 @@ def local_rag_search(question: str) -> str:
             logger.warning(
                 f"本地知识库需要用户确认型号（确权未完成）：task_id={task_id}，知识库返回={answer[:80]}"
             )
-            return (
-                "【需要用户确认型号】知识库无法确定你问的是哪一个产品。"
-                "这**不是检索失败**，而是问题里的型号不够准确 —— 知识库的返回是："
-                f"{answer}\n"
-                "请把这一情况如实上报给主智能体，由主智能体在最终答复里请用户补充准确的型号。"
-                "**不要用相同措辞重复检索**：重试不会得到不同结果。"
-            )
+            # 登记同问题短路：同会话内再问**完全相同**的问题时直接返回同一条反问；
+            # 换角度/换措辞的问题不受影响（多角度检索是召回质量来源，不能被误伤）
+            mark_short_circuit(session_id, question, answer)
+            # 同时开闸：本任务内后续调用（含换措辞 / 换角度的问法）一律返回同一条反问
+            mark_unresolved(session_id, answer)
+            # 回填占位并唤醒等待者：它们拿到的会是逐字一致的同一条反问，且不再执行链路
+            finish_inflight(session_id, answer)
+            return _clarify_message(answer)
 
         if not answer:
             logger.warning(f"本地知识库检索未产出答案：task_id={task_id}")
+            finish_inflight(session_id)
             return "本地知识库未返回任何内容，可能知识库中没有与该问题相关的资料。"
+        # 正常完成：回填"未开闸"，等待方醒来后会被放行去跑各自的角度（多角度检索是设计行为）
+        finish_inflight(session_id)
         return answer
     except Exception as e:
         # 其它失败不应中断整个智能体任务：转成中文提示交给模型继续处理
@@ -150,6 +185,7 @@ def local_rag_search(question: str) -> str:
         # 标记本任务内该工具已故障 → 后续调用在入口直接短路，杜绝重试风暴。
         # 键必须是 session_id（thread_id），不能用 task_id（见 app/core/tool_failfast.py）
         mark_tool_failed(session_id, _TOOL_NAME, str(e))
+        finish_inflight(session_id)
         return f"本地知识库检索失败，错误原因：{str(e)}"
 
 

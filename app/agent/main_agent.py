@@ -60,6 +60,7 @@ from app.core.retrieval_funnel_store import (
     get_funnel as get_retrieval_funnel,
     reset_funnel as reset_retrieval_funnel,
 )
+from app.core.answer_shortcircuit import clear_short_circuits, reset_short_circuits
 from app.core.tool_failfast import clear_tool_failures, get_failed_tools
 from app.core.subagent_reports import (
     clear_reports as clear_subagent_reports,
@@ -220,6 +221,8 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     reset_retrieval_funnel(session_id)
     # 同上：thread_id 跨任务复用，图片收集器不清理会把上一轮的图挂到本轮答案上
     reset_knowledge_images(session_id)
+    # 同上：确权反问短路按会话累积，不清会让上一轮已确认的歧义问题在本轮被静默短路
+    reset_short_circuits(session_id)
     # 结局标记由各分支显式设置；默认 unknown 便于暴露"漏设"（收尾时读它落库）
     outcome = "unknown"
 
@@ -428,6 +431,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
             )
         # 清理内存态（统一放在采集之后）
         clear_tool_failures(session_id)
+        clear_short_circuits(session_id)
         clear_budgets(session_id)
         clear_subagent_reports(session_id)
         clear_retrieval_funnel(session_id)

@@ -467,7 +467,14 @@ def _strip_untrusted_links(answer: str) -> str:
 def step_4_write_history(state: QueryGraphState, image_urls=None) -> QueryGraphState:
     """
     阶段四：把本轮答案写入统一会话集合（rag 层）。
+
     """
+    if state.get("_confirm_unresolved"):
+        logger.info(
+            "确权未完成的兜底轮：反问不写入检索层历史（防止下一轮被系统自己读走而自行代答）："
+            f"session_id={state.get('session_id')}"
+        )
+        return state
     session_id = state.get("session_id", "default")
     answer = (state.get("answer") or "").strip()
     item_names = state.get("item_names") or []
