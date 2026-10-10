@@ -72,6 +72,12 @@ class QueryPipelineConfig:
     rrf_kg_weight: float  # RRF 融合时图谱路的权重（其余两路恒为 1.0）
     kg_evidence_budget: int  # 图谱证据区预算（从 LOCAL_EVIDENCE_BUDGET 中划分，不额外挤占总预算）
 
+    # ==================== 兜底召回（node_search_embedding_fallback / node_rrf / node_rerank）====================
+    # 补充路：不加 item_name 过滤做一次全库混合检索，给"确权选错主体"场景兜底。
+    fallback_search_limit: int  # 补充路召回条数（份额）；只取固定条数，防止全库检索放大耗时
+    fallback_min_keep: int  # 补充路最小保留条数（0 = 关闭，纯靠 cross-encoder 竞争决定去留）
+    rrf_fallback_weight: float  # 补充路在 RRF 融合中的权重（与 embedding/hyde 恒 1.0、kg 0.7 并列）
+
 
 query_pipeline_config = QueryPipelineConfig(
     # ---- 重排与动态截断 ----
@@ -119,6 +125,13 @@ query_pipeline_config = QueryPipelineConfig(
     kg_max_total_triples=int(os.getenv("KG_MAX_TOTAL_TRIPLES", "50")),
     rrf_kg_weight=float(os.getenv("RRF_KG_WEIGHT", "0.7")),
     kg_evidence_budget=int(os.getenv("KG_EVIDENCE_BUDGET", "2000")),
+    # ---- 兜底召回 ----
+    # 默认 3：主路 chunk_search_limit(12) 的 1/4，先小值观测存活率，用存活率决定是否放大。
+    fallback_search_limit=int(os.getenv("FALLBACK_SEARCH_LIMIT", "3")),
+    # 默认 0 = 关闭：补充路证据先纯靠 cross-encoder 同池竞争，不强行保底（避免误放噪声）。
+    fallback_min_keep=int(os.getenv("FALLBACK_MIN_KEEP", "0")),
+    # 默认 1.0：与 embedding/hyde 同权，同池竞争；最终去留由 cross-encoder 分数决定。
+    rrf_fallback_weight=float(os.getenv("RRF_FALLBACK_WEIGHT", "1.0")),
 )
 
 
@@ -192,15 +205,16 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
     if cfg.web_search_count <= 0:
         raise ConfigurationError(f"配置非法：WEB_SEARCH_COUNT({cfg.web_search_count}) 必须大于 0")
     # 5.1 检索漏斗三段预算的方向不变式：
-    #     ① rrf_top 不能超过三路召回基数之和（宽松上界）——超过则融合"永远取不满"，
+    #     ① rrf_top 不能超过三路召回基数之和 + 补充路份额（宽松上界）——超过则融合"永远取不满"，
     #        说明参数互相矛盾，应显式报错而不是让检索结果静默劣化；
     #     ② 最终证据池 = RRF 池 + 联网池，故 rerank_max_topk 不能超过二者之和，
     #        否则意味着"配置期望的证据数大于所有来源能提供的总量"。
-    three_route_capacity = 3 * cfg.chunk_search_limit
+    three_route_capacity = 3 * cfg.chunk_search_limit + cfg.fallback_search_limit
     if cfg.rrf_top > three_route_capacity:
         raise ConfigurationError(
-            f"配置冲突：RRF_TOP({cfg.rrf_top}) 不能大于三路召回容量之和 "
-            f"3 * CHUNK_SEARCH_LIMIT({cfg.chunk_search_limit}) = {three_route_capacity}"
+            f"配置冲突：RRF_TOP({cfg.rrf_top}) 不能大于三路召回容量 + 补充路份额 "
+            f"3 * CHUNK_SEARCH_LIMIT({cfg.chunk_search_limit}) + "
+            f"FALLBACK_SEARCH_LIMIT({cfg.fallback_search_limit}) = {three_route_capacity}"
         )
     merged_capacity = cfg.rrf_top + cfg.web_search_count
     if cfg.rerank_max_topk > merged_capacity:
@@ -244,6 +258,20 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
             f"配置冲突：KG_EVIDENCE_BUDGET({cfg.kg_evidence_budget}) 不能大于 "
             f"LOCAL_EVIDENCE_BUDGET({cfg.local_evidence_budget})，"
             f"因为图谱证据区预算是从本地证据总预算中划分出来的"
+        )
+    # 8. 兜底召回相关：份额非负、最小保留在 [0, 份额] 内（保底补入后总数永不超过份额）、权重非负
+    if cfg.fallback_search_limit < 0:
+        raise ConfigurationError(
+            f"配置非法：FALLBACK_SEARCH_LIMIT({cfg.fallback_search_limit}) 不能为负数"
+        )
+    if cfg.fallback_min_keep < 0 or cfg.fallback_min_keep > cfg.fallback_search_limit:
+        raise ConfigurationError(
+            f"配置冲突：FALLBACK_MIN_KEEP({cfg.fallback_min_keep}) 必须满足 "
+            f"0 <= FALLBACK_MIN_KEEP <= FALLBACK_SEARCH_LIMIT({cfg.fallback_search_limit})"
+        )
+    if cfg.rrf_fallback_weight < 0:
+        raise ConfigurationError(
+            f"配置非法：RRF_FALLBACK_WEIGHT({cfg.rrf_fallback_weight}) 不能为负数"
         )
 
 

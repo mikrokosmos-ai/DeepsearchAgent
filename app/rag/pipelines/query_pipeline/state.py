@@ -19,6 +19,7 @@ class QueryGraphState(TypedDict):
     web_search_docs: list  # 网络搜索回来的文档
     kg_chunks: list  # 知识图谱检索结果（RRF 可融合的 {id, distance, entity} 结构，entity.type="kg"）
     kg_triples: list  # 一跳扩展得到的三元组 [{source, relation, target, item_name}]
+    fallback_chunks: list  # 兜底召回的切片（无 item_name 过滤，entity.type="milvus_fallback"）
 
     # --- 排序过程中的数据 ---
     rrf_chunks: list  # RRF 融合排序后的切片
@@ -37,6 +38,7 @@ class QueryGraphState(TypedDict):
     channel_stat_hyde: dict
     channel_stat_kg: dict
     channel_stat_web: dict
+    channel_stat_fallback: dict  # 兜底召回路的通道状态（第 5 路，与其余 4 路命名对称）
 
     # --- 生成过程中的数据 ---
     prompt: str  # 组装好的 Prompt
@@ -63,6 +65,7 @@ query_graph_default_state: QueryGraphState = {
     "web_search_docs": [],
     "kg_chunks": [],
     "kg_triples": [],
+    "fallback_chunks": [],
     "rrf_chunks": [],
     "reranked_docs": [],
     "retrieval_funnel": {},
@@ -73,6 +76,7 @@ query_graph_default_state: QueryGraphState = {
     "channel_stat_hyde": {},
     "channel_stat_kg": {},
     "channel_stat_web": {},
+    "channel_stat_fallback": {},
     "prompt": "",
     "answer": "",
     "item_names": [],

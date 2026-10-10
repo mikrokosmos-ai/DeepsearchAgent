@@ -73,14 +73,15 @@ def _split_docs_by_type(reranked_docs):
     """
     分流：按 type 字段把重排结果拆成**三区**。
     约定：
-        type == "milvus" → 本地知识库（高信任）
-        type == "kg"     → 本地知识图谱关系（高信任，独立成区，不再被误并入本地区）
+        type == "milvus"           → 本地知识库（高信任）
+        type == "milvus_fallback"  → 本地知识库（兜底召回，同属高信任本地证据）
+        type == "kg"               → 本地知识图谱关系（高信任，独立成区，不再被误并入本地区）
         其余（web / 缺失 / 未知）→ 联网区（最低信任，fail-safe：宁可少信不可多信）
     """
     local_docs, kg_docs, web_docs = [], [], []
     for doc in reranked_docs or []:
         doc_type = doc.get("type")
-        if doc_type == "milvus":
+        if doc_type in ("milvus", "milvus_fallback"):
             local_docs.append(doc)
         elif doc_type == "kg":
             kg_docs.append(doc)

@@ -6,6 +6,7 @@ from app.rag.pipelines.query_pipeline.nodes.node_rerank import node_rerank
 from app.rag.pipelines.query_pipeline.nodes.node_rrf import node_rrf
 from app.rag.pipelines.query_pipeline.nodes.node_search_embedding import node_search_embedding
 from app.rag.pipelines.query_pipeline.nodes.node_search_embedding_hyde import node_search_embedding_hyde
+from app.rag.pipelines.query_pipeline.nodes.node_search_embedding_fallback import node_search_embedding_fallback
 from app.rag.pipelines.query_pipeline.nodes.node_web_search_mcp import node_web_search_mcp
 from app.rag.pipelines.query_pipeline.nodes.node_query_kg import node_query_kg
 from app.rag.pipelines.query_pipeline.state import QueryGraphState
@@ -17,6 +18,7 @@ query_graph = StateGraph(QueryGraphState)
 query_graph.add_node("node_item_name_confirm", node_item_name_confirm)
 query_graph.add_node("node_search_embedding", node_search_embedding)
 query_graph.add_node("node_search_embedding_hyde", node_search_embedding_hyde)
+query_graph.add_node("node_search_embedding_fallback", node_search_embedding_fallback)
 query_graph.add_node("node_web_search_mcp", node_web_search_mcp)
 query_graph.add_node("node_query_kg", node_query_kg)
 query_graph.add_node("node_rrf", node_rrf)
@@ -37,9 +39,13 @@ def node_item_name_confirm_after_router(state: QueryGraphState):
         logger.warning(f"node_item_name_confirm_无法继续向后执行: {state['answer']}")
         return "node_answer_output"
     # 为空,可以正常执行,并发执行多路检索节点
-    # 说明：这里返回「元组」即表示并行扇出 4 路召回（不引入虚节点），
-    #      因此 path_map 必须同步补齐这 4 条映射，否则运行期会因映射缺失而报错。
-    return "node_search_embedding", "node_search_embedding_hyde", "node_web_search_mcp", "node_query_kg"
+    return (
+        "node_search_embedding",
+        "node_search_embedding_hyde",
+        "node_search_embedding_fallback",
+        "node_web_search_mcp",
+        "node_query_kg",
+    )
 
 
 query_graph.add_conditional_edges("node_item_name_confirm",
@@ -48,12 +54,14 @@ query_graph.add_conditional_edges("node_item_name_confirm",
                                        "node_answer_output": "node_answer_output",
                                        "node_search_embedding": "node_search_embedding",
                                        "node_search_embedding_hyde": "node_search_embedding_hyde",
+                                       "node_search_embedding_fallback": "node_search_embedding_fallback",
                                        "node_web_search_mcp": "node_web_search_mcp",
                                        "node_query_kg": "node_query_kg"
                                    })
-# 5. 指定静态边（4 路召回汇入 node_rrf，由 LangGraph 的 superstep 语义隐式汇合）
+# 5. 指定静态边（5 路召回汇入 node_rrf，由 LangGraph 的 superstep 语义隐式汇合）
 query_graph.add_edge("node_search_embedding", "node_rrf")
 query_graph.add_edge("node_search_embedding_hyde", "node_rrf")
+query_graph.add_edge("node_search_embedding_fallback", "node_rrf")
 query_graph.add_edge("node_web_search_mcp", "node_rrf")
 query_graph.add_edge("node_query_kg", "node_rrf")
 query_graph.add_edge("node_rrf", "node_rerank")

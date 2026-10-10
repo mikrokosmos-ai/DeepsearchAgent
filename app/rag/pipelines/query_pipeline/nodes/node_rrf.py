@@ -10,15 +10,17 @@ from app.core.logger import logger, node_log, step_log
 RRF_K = query_pipeline_config.rrf_k
 # top：融合排序后保留的条数
 RRF_TOP = query_pipeline_config.rrf_top
-# 知识图谱路的融合权重（向量路 / HyDE 路恒为 1.0）
+# 知识图谱路的融合权重（向量路 / HyDE 路 / 补充路恒为 1.0）
 RRF_KG_WEIGHT = query_pipeline_config.rrf_kg_weight
+# 补充路（无主体过滤兜底召回）的融合权重
+RRF_FALLBACK_WEIGHT = query_pipeline_config.rrf_fallback_weight
 
-# 参与 RRF 的三路名称，顺序与 param_list 严格对齐（漏斗指标的 key 来源）
-ROUTE_NAMES = ("embedding", "hyde", "kg")
+# 参与 RRF 的四路名称，顺序与 param_list 严格对齐（漏斗指标的 key 来源）
+ROUTE_NAMES = ("embedding", "hyde", "kg", "fallback")
 
 """
   节点: 多路融合排序 (node_rrf)
-  入参:  embedding_chunks / hyde_embedding_chunks / kg_chunks
+  入参:  embedding_chunks / hyde_embedding_chunks / kg_chunks / fallback_chunks
   出参:  rrf_chunks
   说明:  联网路（web_search_docs）不参与 RRF —— 它不带 chunk_id、也不做 rank 融合，
          由下游 node_rerank 以「独立来源」并入统一证据池（见 node_rerank.step_2）。
@@ -35,7 +37,8 @@ def step_1_data_validates(state):
     embedding_chunks = state.get("embedding_chunks", [])
     hyde_embedding_chunks = state.get("hyde_embedding_chunks", [])
     kg_chunks = state.get("kg_chunks", [])
-    return embedding_chunks, hyde_embedding_chunks, kg_chunks
+    fallback_chunks = state.get("fallback_chunks", [])
+    return embedding_chunks, hyde_embedding_chunks, kg_chunks, fallback_chunks
 
 
 @step_log("step_2_rrf_list")
@@ -98,10 +101,13 @@ def _build_funnel(param_list, hit_routes, out_count: int) -> dict:
         name: len(chunks_list) for name, (chunks_list, _w) in zip(ROUTE_NAMES, param_list)
     }
     # 跨路一致性分布：一条 chunk 被几路同时召回（多路命中越多，证据越可信）
-    overlap = {"3-way": 0, "2-way": 0, "1-way": 0}
+    # 4 路召回 → 分桶最多 4-way。桶名与数量必须与实际路数同步，否则漏斗指标静默失真。
+    overlap = {"4-way": 0, "3-way": 0, "2-way": 0, "1-way": 0}
     for routes in hit_routes.values():
         n = len(routes)
-        if n >= 3:
+        if n >= 4:
+            overlap["4-way"] += 1
+        elif n == 3:
             overlap["3-way"] += 1
         elif n == 2:
             overlap["2-way"] += 1
@@ -123,13 +129,15 @@ def node_rrf(state):
     """
     # 1. 日志+任务
     add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
-    # 2. 参数获取和校验 embedding_chunks hyde_embedding_chunks  get("key",[])
-    embedding_chunks, hyde_embedding_chunks, kg_chunks = step_1_data_validates(state)
-    # 3. 处理下集合参数 [(embedding_chunks,1.0),(hyde_embedding_chunks,1.0),(kg_chunks,RRF_KG_WEIGHT)]  -> param_list
+    # 2. 参数获取和校验 embedding_chunks hyde_embedding_chunks kg_chunks fallback_chunks
+    embedding_chunks, hyde_embedding_chunks, kg_chunks, fallback_chunks = step_1_data_validates(state)
+    # 3. 处理下集合参数 [(embedding_chunks,1.0),(hyde_embedding_chunks,1.0),(kg_chunks,RRF_KG_WEIGHT),
+    #                     (fallback_chunks,RRF_FALLBACK_WEIGHT)]  -> param_list
     param_list = [
         (embedding_chunks, 1.0),
         (hyde_embedding_chunks, 1.0),
-        (kg_chunks, RRF_KG_WEIGHT)
+        (kg_chunks, RRF_KG_WEIGHT),
+        (fallback_chunks, RRF_FALLBACK_WEIGHT),
     ]
     # 4. RRF + 权重排序：param_list -> rrf_chunks（元素为 entity dict）
     entity_list, rrf_funnel = step_2_rrf_list(param_list)

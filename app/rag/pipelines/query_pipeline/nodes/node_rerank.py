@@ -74,6 +74,8 @@ def step_2_merged_rrf_and_mcp(rrf_chunks, web_search_docs):
     # 2. 循环rrf_chunks路数据整合
     #    关键：type 必须从 entity 传播过来 —— 图谱证据带 type="kg"，
     #    若在此统一写成 "milvus"，图谱证据会被误并入本地知识库区（丢失独立分区）。
+    #    补充路证据带 type="milvus_fallback"，同样经此传播，供下游区分「定向路 vs 兜底路」，
+    #    并让 step_5 的本地保底（type == "milvus" 精确匹配）天然把它排除在外。
     if rrf_chunks and len(rrf_chunks) > 0:
         for chunk in rrf_chunks:
             final_chunk_list.append({
