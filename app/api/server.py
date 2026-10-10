@@ -35,6 +35,7 @@ from app.api.lifespan import lifespan
 from app.api.memory_routes import router as memory_router
 from app.api.monitor import manager
 from app.api.session_routes import router as session_router
+from app.api.image_proxy import router as image_proxy_router
 from app.core.cancel import clear_cancel, request_cancel, reset_cancel
 from app.core.logger import logger
 from app.core.tool_failfast import reset_tool_failures
@@ -55,6 +56,8 @@ app.include_router(kb_doc_router)
 app.include_router(memory_router)
 # 会话（页面）管理接口（列表 / 按会话整体删除）：
 app.include_router(session_router)
+# 知识库图片同源代理（浏览器经此后端取图，规避直连 MinIO 被代理拦截）
+app.include_router(image_proxy_router)
 
 # 启动归一化：上次进程中断留下的 processing / reindexing 登记置为 failed。
 # 此时 indexed_hash 未被改写 → 重新触发 reindex 安全幂等。

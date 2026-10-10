@@ -17,6 +17,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
 import { KnowledgeImage, MarkdownRenderer } from "./MarkdownRenderer";
+import { toProxySrc } from "../lib/imageProxy";
 import type { MonitorMessage, OutputFile, SubAgentNotice } from "../types";
 
 export interface ChatTurn {
@@ -702,7 +703,7 @@ function AnswerZone({ turn }: { turn: ChatTurn }) {
             </div>
             <div className="agent-image-strip" aria-label="知识库命中配图">
               {turn.imageUrls.map((url) => (
-                <KnowledgeImage alt="知识库命中配图" key={url} src={url} thumb />
+                <KnowledgeImage alt="知识库命中配图" key={url} src={toProxySrc(url)} thumb />
               ))}
             </div>
           </div>

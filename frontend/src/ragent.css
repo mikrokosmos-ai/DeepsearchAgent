@@ -2747,6 +2747,11 @@
   object-fit: contain;
 }
 
+/* 预留高度：图片加载前容器已占住空间，避免加载完成瞬间整体下移（CLS / 抖动） */
+.agent-app .agent-image:not(.agent-image--thumb):not(.agent-image--failed) {
+  min-height: 120px;
+}
+
 .agent-app .agent-image--thumb {
   width: 168px;
   height: 120px;

@@ -2,6 +2,7 @@ import { FileImageOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { toProxySrc } from "../lib/imageProxy";
 
 interface MarkdownRendererProps {
   content: string;
@@ -85,7 +86,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             );
           },
           img({ alt, src }) {
-            return src ? <KnowledgeImage alt={alt} src={src} /> : null;
+            return src ? <KnowledgeImage alt={alt} src={toProxySrc(src)} /> : null;
           }
         }}
       >

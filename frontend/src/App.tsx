@@ -286,8 +286,9 @@ export default function App() {
     window.requestAnimationFrame(() => {
       streamNode.scrollTo({
         top: streamNode.scrollHeight,
-        // 流式期间用即时定位：平滑动画会被高频事件反复打断，叠加成持续下拽
-        behavior: session.isRunning ? "auto" : "smooth"
+        // 一律即时定位：平滑滚动会被高频 delta 打断，且图片晚到加载的高度跳变
+        // 经平滑动画"滑"出来会表现为抖动；即时定位直接吸附到最新位置。
+        behavior: "auto"
       });
     });
   }, [turns, session.isRunning]);
